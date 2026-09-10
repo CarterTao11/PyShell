@@ -269,3 +269,4 @@ CLAUDE.md
 .claude/
 .env.secrets.local
 CLAUDE.md
+./data/*
