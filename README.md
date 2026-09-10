@@ -9,7 +9,24 @@
 - **会话管理** — 保存和管理 SSH 连接，支持分组和标签
 - **多种认证** — 支持密码、私钥、键盘交互三种认证方式
 - **终端** — 多标签页 + 左右/上下分屏；**全局命令模式**：一条命令回车即发送到所有打开的终端（含历史记录与 ^C 中断）
+- **命令队列** — 多行命令按顺序执行，通过终端缓冲区完成标记（POSIX shell）自动衔接上一条与下一条
+- **定时任务** — 后端线程定时连接已保存会话执行命令（间隔 / 每天两种调度，超时保护，结果与退出码入库），浏览器关闭不影响运行
 - **SFTP 文件管理** — 浏览、上传（支持多选、整个文件夹、拖拽，自动保留目录结构，同名文件直接覆盖）、下载、删除、在线编辑文本文件（≤ 2 MB，UTF-8，Ctrl+S 保存直接覆盖）
+- **分屏** — 左右/上下分屏；切换标签时新终端进入"焦点窗格"，另一窗格保持稳定不被顶掉
+
+## 打包为 exe
+
+```powershell
+# 单文件版（推荐分发）：dist\PyShell.exe，双击即启动并自动打开浏览器
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --console --name PyShell --add-data "web;web" --paths backend backend\app.py
+
+# 目录版（启动更快）：dist\PyShell\PyShell.exe + _internal\
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --console --name PyShell --add-data "web;web" --paths backend backend\app.py
+```
+
+- 数据（数据库、会话、主机密钥）保存在 **exe 旁边的 `data\` 目录**
+- 默认端口 5173，被占用时自动顺延；`PORT` 环境变量可指定
+- 前端资源（web/）已打包进 exe，无需随行分发
 - **凭据加密** — Windows 下使用 DPAPI 加密存储凭据
 - **主机密钥管理** — 首次连接时验证并保存主机密钥指纹
 
