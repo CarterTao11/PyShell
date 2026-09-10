@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1e1e2e"/>
+      <stop offset="100%" stop-color="#0b0b12"/>
+    </linearGradient>
+    <linearGradient id="term" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#24273a"/>
+      <stop offset="100%" stop-color="#181825"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 背景圆角方块 -->
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!-- 终端窗口 -->
+  <rect x="56" y="76" width="400" height="360" rx="32" fill="url(#term)" stroke="#313244" stroke-width="3"/>
+
+  <!-- 终端标题栏 -->
+  <rect x="56" y="76" width="400" height="56" rx="32" fill="#24273a"/>
+  <rect x="56" y="104" width="400" height="28" fill="#24273a"/>
+
+  <!-- 三个窗口圆点 -->
+  <circle cx="96" cy="104" r="8" fill="#ff5f56"/>
+  <circle cx="132" cy="104" r="8" fill="#ffbd2e"/>
+  <circle cx="168" cy="104" r="8" fill="#27c93f"/>
+
+  <!-- 核心提示符 >_：> 用 Python 蓝，_ 用 Python 黄 -->
+  <text x="200" y="280" text-anchor="middle"
+        font-family="Consolas, 'Courier New', monospace"
+        font-size="170" font-weight="bold" fill="#3776ab">&gt;</text>
+  <text x="300" y="260" text-anchor="middle"
+        font-family="Consolas, 'Courier New', monospace"
+        font-size="170" font-weight="bold" fill="#ffd43b">_</text>
+
+  <!-- 产品名 -->
+  <text x="256" y="360" text-anchor="middle"
+        font-family="Consolas, 'Courier New', monospace"
+        font-size="46" font-weight="bold"
+        fill="#cdd6f4" letter-spacing="2">PyShell</text>
+</svg>

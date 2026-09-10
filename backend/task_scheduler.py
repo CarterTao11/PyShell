@@ -187,10 +187,19 @@ def compute_due(schedule_type, interval_seconds, daily_time, last_run, enabled,
             return False
         m = _TIME_RE.match(daily_time)
         hh, mm = int(m.group(1)), int(m.group(2))
-        if last_run is not None and last_run.date() >= now.date():
-            return False
         if (now.hour, now.minute) < (hh, mm):
             return False
+        # "done for today" means it already ran AT/AFTER today's HH:MM.
+        # An earlier manual run (e.g. a test at 18:43 for an 18:52 task)
+        # must not suppress the scheduled run.
+        if last_run is not None:
+            if last_run.date() > now.date():
+                return False
+            if last_run.date() == now.date() and \
+                    (last_run.hour, last_run.minute) >= (hh, mm):
+                return False
+        # The creation day does not count as a catch-up day if the task
+        # time had already passed when the task was created.
         if created_at is not None:
             created_local = _to_local(created_at)
             if created_local.date() == now.date() and \
