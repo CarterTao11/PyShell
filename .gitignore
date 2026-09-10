@@ -270,3 +270,4 @@ CLAUDE.md
 .env.secrets.local
 CLAUDE.md
 ./data/*
+*.db
