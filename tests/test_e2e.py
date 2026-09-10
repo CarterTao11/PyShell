@@ -188,6 +188,9 @@ class FileSFTPInterface(paramiko.SFTPServerInterface):
 
 
 class MockServer(paramiko.ServerInterface):
+    def __init__(self):
+        self.exec_command_received = None
+
     def check_channel_request(self, kind, chanid):
         return paramiko.OPEN_SUCCEEDED
 
@@ -206,6 +209,11 @@ class MockServer(paramiko.ServerInterface):
                                   pixelwidth, pixelheight, modes):
         return True
 
+    def check_channel_exec_request(self, channel, command):
+        # Record the command; handle() answers it without a PTY/shell
+        self.exec_command_received = command
+        return True
+
 
 def handle(conn):
     transport = None
@@ -214,10 +222,29 @@ def handle(conn):
         transport.set_subsystem_handler(
             "sftp", paramiko.SFTPServer, FileSFTPInterface, root=SFTP_ROOT)
         transport.add_server_key(host_key)
-        transport.start_server(server=MockServer())
+        server = MockServer()
+        transport.start_server(server=server)
         chan = transport.accept(20)
         if chan is None:
             return
+
+        # An exec request usually arrives right after the channel opens;
+        # wait briefly so exec-mode connections are detected reliably.
+        deadline = time.time() + 0.4
+        while server.exec_command_received is None \
+                and time.time() < deadline and not chan.closed:
+            time.sleep(0.02)
+
+        if server.exec_command_received is not None:
+            # exec mode (scheduled tasks): echo a canned result + exit status
+            cmd = server.exec_command_received
+            if isinstance(cmd, bytes):
+                cmd = cmd.decode("utf-8", "replace")
+            chan.send(f"EXEC-OUTPUT: {cmd}\n".encode("utf-8"))
+            chan.send_exit_status(1 if cmd.strip() == "failcmd" else 0)
+            chan.close()
+            return
+
         chan.send("Welcome to MockSSH!\r\n")
         while True:
             got = False
@@ -265,6 +292,15 @@ def post_json(path, obj, timeout=15):
     req = urllib.request.Request(
         BASE + path, data=json.dumps(obj).encode("utf-8"), method="POST")
     req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        _raise_with_body(e)
+
+
+def delete_json(path, timeout=15):
+    req = urllib.request.Request(BASE + path, method="DELETE")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
@@ -505,7 +541,80 @@ def main():
           trd.get("success") is True and trd.get("content") == tricky_body,
           str(trd)[:200])
 
-    # 6. disconnect -> SSE 'closed' event
+    # 6. scheduled tasks (定时任务): CRUD + manual run via SSH exec
+    sess = post_json("/api/sessions", {
+        "name": "mock-task-host", "host": MOCK_HOST, "port": MOCK_PORT,
+        "username": "test", "auth_type": "password", "password": "test",
+    })
+    sess_id = sess.get("id")
+    check("create session for task", isinstance(sess_id, int), str(sess)[:200])
+    t1 = post_json("/api/tasks", {
+        "name": "e2e-ok", "session_id": sess_id, "command": "echo hello",
+        "schedule_type": "interval", "interval_seconds": 3600,
+    })
+    check("create scheduled task", t1.get("success") is True, str(t1)[:200])
+    task_id = (t1.get("task") or {}).get("id")
+    run1 = post_json(f"/api/tasks/{task_id}/run", {})
+    r1 = run1.get("result") or {}
+    check("task run ok", run1.get("success") is True and r1.get("status") == "ok"
+          and r1.get("exit_code") == 0, str(run1)[:300])
+    check("task output captured", "EXEC-OUTPUT: echo hello" in (r1.get("output") or ""),
+          str(r1.get("output"))[:200])
+
+    t2 = post_json("/api/tasks", {
+        "name": "e2e-fail", "session_id": sess_id, "command": "failcmd",
+        "schedule_type": "interval", "interval_seconds": 3600,
+    })
+    task2_id = (t2.get("task") or {}).get("id")
+    run2 = post_json(f"/api/tasks/{task2_id}/run", {})
+    r2 = run2.get("result") or {}
+    check("task run captures failure",
+          r2.get("status") == "error" and r2.get("exit_code") == 1, str(run2)[:300])
+
+    lst = get_json("/api/tasks")
+    ids = {t["id"] for t in lst.get("tasks", [])}
+    check("task list contains both", {task_id, task2_id} <= ids, str(ids))
+    # PUT via urllib
+    req = urllib.request.Request(BASE + f"/api/tasks/{task_id}",
+                                 data=json.dumps({"interval_seconds": 7200}).encode(),
+                                 method="PUT")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        updt = json.loads(r.read().decode("utf-8"))
+    check("task update ok", updt.get("success") is True
+          and updt["task"]["interval_seconds"] == 7200, str(updt)[:200])
+    dele = delete_json(f"/api/tasks/{task2_id}")
+    check("task delete ok", dele.get("success") is True, str(dele))
+
+    # 6b. automatic scheduling: a 10s-interval task must be executed by the
+    # backend scheduler thread (tick 20s) without any manual trigger
+    t3 = post_json("/api/tasks", {
+        "name": "e2e-auto", "session_id": sess_id, "command": "echo autotick",
+        "schedule_type": "interval", "interval_seconds": 10,
+    })
+    auto_id = (t3.get("task") or {}).get("id")
+    check("create auto task", t3.get("success") is True, str(t3)[:200])
+    auto_ran = None
+    deadline = time.time() + 75
+    while time.time() < deadline:
+        lt = get_json("/api/tasks")
+        row = next((x for x in lt.get("tasks", []) if x["id"] == auto_id), None)
+        if row and row.get("last_run"):
+            auto_ran = row
+            break
+        time.sleep(2)
+    check("scheduler auto-executed task", auto_ran is not None,
+          "task never ran within 75s")
+    if auto_ran:
+        check("auto run succeeded", auto_ran.get("last_status") == "ok"
+              and auto_ran.get("last_exit_code") == 0, str(auto_ran)[:300])
+        check("auto run output captured",
+              "EXEC-OUTPUT: echo autotick" in (auto_ran.get("last_output") or ""),
+              str(auto_ran.get("last_output"))[:200])
+    dele3 = delete_json(f"/api/tasks/{auto_id}")
+    check("auto task cleanup", dele3.get("success") is True, str(dele3))
+
+    # 7. disconnect -> SSE 'closed' event
     res6 = post_json("/api/ssh/disconnect", {"conn_id": conn_id})
     check("POST /api/ssh/disconnect success", res6.get("success") is True, str(res6))
     time.sleep(1.5)

@@ -181,29 +181,40 @@ const TM = sandbox.__TM;
     check("c2 occupies pane-a", paneOf(c2) === "a");
     check("c1 occupies pane-b", paneOf(c1) === "b");
 
-    // New connection while split on: takes the "other" pane (user was on c2)
+    // New connection while split on: takes the FOCUSED pane (the user was
+    // viewing pane-a via c2); the other pane (c1 in pane-b) stays untouched
     await TM.connect(103, { name: "srv-C", host: "c" });
     const c3 = TM.activeConnId;
     check("third terminal active", TM.activeConnId === c3);
-    check("c3 took pane-b (opposite of viewed pane)", paneOf(c3) === "b", paneOf(c3));
-    check("c1 pushed out of panes (tab-only)", paneOf(c1) === null, paneOf(c1));
-    check("c2 keeps pane-a", paneOf(c2) === "a", paneOf(c2));
+    check("c3 took the focused pane-a", paneOf(c3) === "a", paneOf(c3));
+    check("c2 (was focused) became tab-only", paneOf(c2) === null, paneOf(c2));
+    check("c1 keeps pane-b untouched", paneOf(c1) === "b", paneOf(c1));
 
-    // Clicking a tab-only terminal swaps it into the other pane
-    TM.activateTerminal(c1);
-    check("activate c1 keeps it pane-a", paneOf(c1) === "a");
+    // Clicking the c2 tab swaps it into the focused pane (pane-a),
+    // while pane-b (c1) remains stable
     TM.activateTerminal(c2);
-    check("activate c2 (tab-only) takes free/other pane",
-        paneOf(c2) === "b", paneOf(c2));
+    check("activate c2 -> focused pane-a", paneOf(c2) === "a", paneOf(c2));
+    check("c1 still in pane-b", paneOf(c1) === "b", paneOf(c1));
 
-    // Disconnect the terminal in pane-a -> pane backfilled by tab-only c3
-    await TM.disconnect(c1);
-    check("after disconnect c1, panes still two",
+    // Focus pane-b by activating c1 (already panned -> no layout change)
+    TM.activateTerminal(c1);
+    check("activate c1 (already panned) keeps pane-b", paneOf(c1) === "b");
+
+    // Activate tab-only c3 while pane-b is focused: c3 enters pane-b,
+    // pane-a (c2) stays put — the fix for panes flipping on tab switches
+    TM.activateTerminal(c3);
+    check("c3 entered focused pane-b", paneOf(c3) === "b", paneOf(c3));
+    check("c2 untouched in pane-a", paneOf(c2) === "a", paneOf(c2));
+
+    // Disconnect the terminal in pane-a (c2) -> freed pane backfilled by
+    // the tab-only terminal (c1)
+    await TM.disconnect(c2);
+    check("after disconnect c2, panes still two",
         TM.splitPanes.filter(Boolean).length === 2, JSON.stringify(TM.splitPanes));
     check("still split mode", TM.splitMode === "v");
 
     // Disconnect down to one terminal -> split turns off
-    await TM.disconnect(TM.activeConnId === c3 ? c2 : c3);
+    await TM.disconnect(c3);
     check("single terminal left -> split off", TM.splitMode === null);
     check("container split-v cleared", !container.classList.contains("split-v"));
     const last = Array.from(TM.instances.keys())[0];
