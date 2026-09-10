@@ -92,6 +92,7 @@ def main():
     # - frozen exe with no PORT -> 5173, stepping aside if occupied
     # - source run with no PORT -> 0 = random (previous behaviour)
     port = Config.PORT
+    host = Config.HOST
     if not port and getattr(sys, "frozen", False):
         port = _find_free_port(5173)
         logger.info(f"Selected free port: {port}")

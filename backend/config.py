@@ -53,3 +53,5 @@ class Config:
     PORT = int(os.getenv("PORT", 0))  # 0 = 随机端口
     # SSH 保活间隔(秒)
     KEEPALIVE_INTERVAL = 30
+    WEB_DIR = WEB_DIR
+    DATA_DIR = DATA_DIR
