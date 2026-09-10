@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PyShell - SSH 客户端</title>
+    <link rel="stylesheet" href="vendor/xterm.css">
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- 侧边栏 -->
+        <aside id="sidebar">
+            <div class="sidebar-header">
+                <h1>PyShell v1.0</h1>
+            </div>
+            <div class="sidebar-tabs">
+                <button class="tab-btn active" data-tab="sessions">会话</button>
+                <button class="tab-btn" data-tab="sftp">SFTP</button>
+            </div>
+            <div id="tab-content-sessions" class="tab-content active">
+                <div class="toolbar">
+                    <button id="btn-new-session" class="btn btn-sm btn-primary">+ 新建</button>
+                </div>
+                <div id="session-list" class="list-container"></div>
+            </div>
+            <div id="tab-content-sftp" class="tab-content">
+                <div class="sftp-empty">
+                    <p>请先通过 SSH 连接终端，</p>
+                    <p>然后在此查看文件。</p>
+                </div>
+                <div id="sftp-browser" style="display:none;">
+                    <div class="sftp-path-bar">
+                        <button id="btn-sftp-up" class="btn btn-xs" title="返回上一级">↑ 上级</button>
+                        <input type="text" id="sftp-path-input" class="sftp-path-input"
+                               spellcheck="false" autocomplete="off"
+                               placeholder="输入路径后回车，如 /var/log">
+                        <span id="sftp-status"></span>
+                    </div>
+                    <div class="sftp-toolbar">
+                        <button id="btn-sftp-upload" class="btn btn-sm btn-primary" title="选择一个或多个文件上传">⬆ 上传文件</button>
+                        <button id="btn-sftp-upload-folder" class="btn btn-sm btn-primary" title="选择整个文件夹上传，保留目录结构">📁 上传文件夹</button>
+                        <button id="btn-sftp-mkdir" class="btn btn-sm" title="新建目录，支持多级路径如 docs/images">+ 新建目录</button>
+                        <button id="btn-sftp-refresh" class="btn btn-sm">刷新</button>
+                    </div>
+                    <div id="sftp-file-list" class="list-container"></div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- 主区域 -->
+        <main id="main-content">
+            <div id="terminal-tabs">
+                <div id="tabs-controls">
+                    <button id="btn-split-v" class="tab-ctrl" title="左右分屏">左右分屏</button>
+                    <button id="btn-split-h" class="tab-ctrl" title="上下分屏">上下分屏</button>
+                    <button id="btn-cmd-mode" class="tab-ctrl" title="开启后，在下方输入命令回车，发送到所有打开的终端">命令模式</button>
+                </div>
+            </div>
+            <div id="cmd-bar" class="hidden">
+                <span class="cmd-label">全局命令 →</span>
+                <input type="text" id="cmd-input" spellcheck="false" autocomplete="off"
+                       placeholder="输入命令后回车，将发送到所有打开的终端（↑/↓ 翻历史）">
+                <button id="btn-cmd-send" class="btn btn-sm btn-primary" title="发送命令到全部终端">执行</button>
+                <button id="btn-cmd-ctrlc" class="btn btn-sm" title="发送 Ctrl+C 中断所有终端正在运行的命令">^C</button>
+                <span id="cmd-status"></span>
+            </div>
+            <div id="terminal-container">
+                <div id="terminal-welcome">
+                    <div class="welcome-content">
+                        <h2>PyShell</h2>
+                        <p>轻量级 SSH 客户端</p>
+                        <p>从左侧选择一个会话连接，或新建一个会话。</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 新建会话对话框 -->
+    <div id="dialog-overlay" class="dialog-overlay hidden">
+        <div id="session-dialog" class="dialog">
+            <div class="dialog-header">
+                <h3 id="dialog-title">新建会话</h3>
+                <button class="dialog-close">&times;</button>
+            </div>
+            <div class="dialog-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>名称</label>
+                        <input type="text" id="form-name" placeholder="可选">
+                    </div>
+                    <div class="form-group">
+                        <label>分组</label>
+                        <input type="text" id="form-group" placeholder="可选">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>主机 *</label>
+                        <input type="text" id="form-host" placeholder="192.168.1.1">
+                    </div>
+                    <div class="form-group" style="max-width:100px;">
+                        <label>端口</label>
+                        <input type="number" id="form-port" value="22">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>用户名</label>
+                        <input type="text" id="form-username" value="root">
+                    </div>
+                    <div class="form-group">
+                        <label>认证方式</label>
+                        <select id="form-auth-type">
+                            <option value="password">密码</option>
+                            <option value="key">密钥</option>
+                            <option value="keyboard-interactive">键盘交互</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group" id="form-password-group">
+                    <label>密码</label>
+                    <input type="password" id="form-password" placeholder="">
+                </div>
+                <div class="form-group" id="form-key-group" style="display:none;">
+                    <label>私钥 (PEM)</label>
+                    <textarea id="form-private-key" rows="6" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;..."></textarea>
+                </div>
+                <div class="form-group" id="form-passphrase-group" style="display:none;">
+                    <label>密钥口令</label>
+                    <input type="password" id="form-passphrase" placeholder="">
+                </div>
+                <div class="form-group">
+                    <label>标签 (逗号分隔)</label>
+                    <input type="text" id="form-tags" placeholder="linux, dev, prod">
+                </div>
+                <div class="form-group">
+                    <label>备注</label>
+                    <textarea id="form-remark" rows="3"></textarea>
+                </div>
+            </div>
+            <div class="dialog-footer">
+                <button id="btn-save-session" class="btn btn-primary">保存</button>
+                <button id="btn-cancel-session" class="btn">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 确认对话框 -->
+    <div id="confirm-overlay" class="dialog-overlay hidden">
+        <div class="dialog dialog-sm">
+            <div class="dialog-header">
+                <h3 id="confirm-title">确认</h3>
+            </div>
+            <div class="dialog-body">
+                <p id="confirm-message"></p>
+            </div>
+            <div class="dialog-footer">
+                <button id="btn-confirm-yes" class="btn btn-primary">确认</button>
+                <button id="btn-confirm-no" class="btn">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 主机密钥确认 -->
+    <div id="hostkey-overlay" class="dialog-overlay hidden">
+        <div class="dialog dialog-sm">
+            <div class="dialog-header">
+                <h3>主机密钥确认</h3>
+            </div>
+            <div class="dialog-body">
+                <p>首次连接到该主机，请确认指纹：</p>
+                <pre id="hostkey-fingerprint" style="background:#1e1e1e;padding:8px;border-radius:4px;color:#fff;"></pre>
+            </div>
+            <div class="dialog-footer">
+                <button id="btn-hostkey-accept" class="btn btn-primary">接受并保存</button>
+                <button id="btn-hostkey-reject" class="btn">拒绝</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 文件编辑器 -->
+    <div id="editor-overlay" class="dialog-overlay hidden">
+        <div class="dialog editor-dialog">
+            <div class="dialog-header">
+                <h3 id="editor-title">编辑文件</h3>
+                <button class="dialog-close" id="btn-editor-close" title="关闭">&times;</button>
+            </div>
+            <div class="dialog-body editor-body">
+                <textarea id="editor-textarea" spellcheck="false" wrap="off"></textarea>
+            </div>
+            <div class="dialog-footer editor-footer">
+                <span id="editor-status"></span>
+                <button id="btn-editor-save" class="btn btn-primary">保存 (Ctrl+S)</button>
+                <button id="btn-editor-close2" class="btn">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 脚本 -->
+    <script src="vendor/xterm.js"></script>
+    <script src="vendor/xterm-addon-fit.js"></script>
+    <script src="vendor/xterm-addon-web-links.js"></script>
+    <script src="js/session.js"></script>
+    <script src="js/terminal.js"></script>
+    <script src="js/sftp.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
