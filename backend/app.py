@@ -87,6 +87,10 @@ def main():
         logger.info(f"Data directory: {Config.DATA_DIR}")
         logger.info(f"Web directory:  {Config.WEB_DIR}")
 
+    # Start the scheduled-task background thread (定时任务)
+    from task_scheduler import start_scheduler
+    start_scheduler(app)
+
     # Determine host and port:
     # - PORT env set -> use it as-is (dev workflow / explicit choice)
     # - frozen exe with no PORT -> 5173, stepping aside if occupied

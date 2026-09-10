@@ -78,3 +78,45 @@ class Setting(db.Model):
 
     key = db.Column(db.String(255), primary_key=True)
     value = db.Column(db.Text, nullable=False, default="")
+
+
+class ScheduledTask(db.Model):
+    __tablename__ = "scheduled_tasks"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(255), nullable=False, default="")
+    session_id = db.Column(db.Integer, db.ForeignKey("sessions.id"), nullable=False)
+    command = db.Column(db.Text, nullable=False, default="")
+    # 'interval' = 每隔 interval_seconds 执行一次; 'daily' = 每天 daily_time 执行
+    schedule_type = db.Column(db.String(16), nullable=False, default="interval")
+    interval_seconds = db.Column(db.Integer, nullable=True)
+    daily_time = db.Column(db.String(5), nullable=True)  # 'HH:MM'
+    timeout_seconds = db.Column(db.Integer, nullable=False, default=300)
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    # 本地时间记录的最近一次执行结果
+    last_run = db.Column(db.DateTime, nullable=True)
+    last_status = db.Column(db.String(16), nullable=True)  # ok / error / timeout
+    last_exit_code = db.Column(db.Integer, nullable=True)
+    last_output = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    session = db.relationship("Session")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "session_id": self.session_id,
+            "session_name": self.session.name if self.session else "(会话已删除)",
+            "host": f"{self.session.username}@{self.session.host}:{self.session.port}" if self.session else "",
+            "command": self.command,
+            "schedule_type": self.schedule_type,
+            "interval_seconds": self.interval_seconds,
+            "daily_time": self.daily_time,
+            "timeout_seconds": self.timeout_seconds,
+            "enabled": self.enabled,
+            "last_run": self.last_run.isoformat(sep=" ", timespec="seconds") if self.last_run else None,
+            "last_status": self.last_status,
+            "last_exit_code": self.last_exit_code,
+            "last_output": self.last_output,
+        }

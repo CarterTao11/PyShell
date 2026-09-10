@@ -206,6 +206,48 @@ document.addEventListener('DOMContentLoaded', async () => {
         setCmdMode(!btnCmdMode.classList.contains('active'));
     });
 
+    // ===== 命令队列 =====
+    const btnCmdQueue = document.getElementById('btn-cmd-queue');
+    const queueBar = document.getElementById('queue-bar');
+
+    function setQueueMode(on) {
+        btnCmdQueue.classList.toggle('active', on);
+        queueBar.classList.toggle('hidden', !on);
+        if (on) setCmdMode(false);  // 队列与全局命令条互斥显示
+        TerminalManager.fitVisible();
+    }
+
+    btnCmdQueue.addEventListener('click', () => {
+        setQueueMode(!btnCmdQueue.classList.contains('active'));
+    });
+    document.getElementById('btn-queue-start').addEventListener('click', () => {
+        CommandQueue.start();
+    });
+    document.getElementById('btn-queue-stop').addEventListener('click', () => {
+        CommandQueue.stop();
+    });
+    document.getElementById('btn-queue-clear').addEventListener('click', () => {
+        CommandQueue.clear();
+    });
+
+    // ===== 定时任务 =====
+    document.getElementById('btn-tasks').addEventListener('click', () => {
+        TaskManager.open();
+    });
+    document.getElementById('btn-tasks-close').addEventListener('click', () => {
+        TaskManager.close();
+    });
+    document.getElementById('btn-task-save').addEventListener('click', () => {
+        TaskManager.save();
+    });
+    document.getElementById('btn-task-reset').addEventListener('click', () => {
+        TaskManager._resetForm();
+    });
+    document.getElementById('task-schedule-type').addEventListener('change', () => {
+        TaskManager._syncScheduleFields();
+    });
+    TaskManager.bindListEvents();
+
     async function runGlobalCmd(text) {
         const t = text.trim();
         if (!t) return;

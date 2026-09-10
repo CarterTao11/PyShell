@@ -55,6 +55,8 @@
                     <button id="btn-split-v" class="tab-ctrl" title="左右分屏">左右分屏</button>
                     <button id="btn-split-h" class="tab-ctrl" title="上下分屏">上下分屏</button>
                     <button id="btn-cmd-mode" class="tab-ctrl" title="开启后，在下方输入命令回车，发送到所有打开的终端">命令模式</button>
+                    <button id="btn-cmd-queue" class="tab-ctrl" title="命令队列：上一条执行完成后自动执行下一条">命令队列</button>
+                    <button id="btn-tasks" class="tab-ctrl" title="定时任务：定时连接某台机器执行命令（后端执行，关浏览器也有效）">定时任务</button>
                 </div>
             </div>
             <div id="cmd-bar" class="hidden">
@@ -64,6 +66,21 @@
                 <button id="btn-cmd-send" class="btn btn-sm btn-primary" title="发送命令到全部终端">执行</button>
                 <button id="btn-cmd-ctrlc" class="btn btn-sm" title="发送 Ctrl+C 中断所有终端正在运行的命令">^C</button>
                 <span id="cmd-status"></span>
+            </div>
+            <div id="queue-bar" class="hidden">
+                <div class="queue-head">
+                    <span class="cmd-label">命令队列 →</span>
+                    <span class="queue-hint">每行一条命令，按顺序执行：上一条完成后自动执行下一条</span>
+                    <button id="btn-queue-start" class="btn btn-sm btn-primary">开始执行</button>
+                    <button id="btn-queue-stop" class="btn btn-sm">停止</button>
+                    <button id="btn-queue-clear" class="btn btn-sm">清空</button>
+                </div>
+                <textarea id="queue-input" rows="4" spellcheck="false"
+                          placeholder="# 每行一条命令，# 开头的行为注释会被忽略&#10;cd /var/log&#10;tail -n 100 app.log&#10;df -h"></textarea>
+                <div class="queue-foot">
+                    <span id="queue-status"></span>
+                    <span class="queue-hint">在当前活动终端执行；通过终端缓冲区检测命令完成（POSIX shell）</span>
+                </div>
             </div>
             <div id="terminal-container">
                 <div id="terminal-welcome">
@@ -180,6 +197,72 @@
         </div>
     </div>
 
+    <!-- 定时任务 -->
+    <div id="tasks-overlay" class="dialog-overlay hidden">
+        <div class="dialog tasks-dialog">
+            <div class="dialog-header">
+                <h3>定时任务</h3>
+                <button class="dialog-close" id="btn-tasks-close" title="关闭">&times;</button>
+            </div>
+            <div class="dialog-body tasks-body">
+                <div id="task-list"></div>
+
+                <div class="task-form">
+                    <div class="task-form-title-row">
+                        <h4 id="task-form-title">新建任务</h4>
+                        <span id="task-form-status"></span>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>任务名称</label>
+                            <input type="text" id="task-name" placeholder="可选，如 每日备份">
+                        </div>
+                        <div class="form-group">
+                            <label>目标会话 *</label>
+                            <select id="task-session"></select>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>要执行的命令 *</label>
+                        <textarea id="task-command" rows="2" spellcheck="false"
+                                  placeholder="如 df -h && free -m"></textarea>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>调度方式</label>
+                            <select id="task-schedule-type">
+                                <option value="interval">间隔执行</option>
+                                <option value="daily">每天定时</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="task-field-interval">
+                            <label>间隔（秒，≥10）</label>
+                            <input type="number" id="task-interval" value="300" min="10">
+                        </div>
+                        <div class="form-group" id="task-field-daily" style="display:none;">
+                            <label>每天时间</label>
+                            <input type="time" id="task-daily" value="09:00">
+                        </div>
+                        <div class="form-group">
+                            <label>超时（秒）</label>
+                            <input type="number" id="task-timeout" value="300" min="5">
+                        </div>
+                        <div class="form-group task-enabled-group">
+                            <label class="task-enabled-label">
+                                <input type="checkbox" id="task-enabled" checked> 启用
+                            </label>
+                        </div>
+                    </div>
+                    <div class="task-form-actions">
+                        <button id="btn-task-save" class="btn btn-primary">保存任务</button>
+                        <button id="btn-task-reset" class="btn">重置表单</button>
+                        <span class="task-hint">由后端定时执行，浏览器关闭不影响；主机密钥未确认的会话请先手动连接一次</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- 文件编辑器 -->
     <div id="editor-overlay" class="dialog-overlay hidden">
         <div class="dialog editor-dialog">
@@ -204,7 +287,9 @@
     <script src="vendor/xterm-addon-web-links.js"></script>
     <script src="js/session.js"></script>
     <script src="js/terminal.js"></script>
+    <script src="js/queue.js"></script>
     <script src="js/sftp.js"></script>
+    <script src="js/tasks.js"></script>
     <script src="js/app.js"></script>
 </body>
 </html>

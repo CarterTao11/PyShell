@@ -7,11 +7,12 @@ import threading
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, Response, stream_with_context
 
-from models import db, Session, Credential, Setting
+from models import db, Session, Credential, Setting, ScheduledTask
 from credential_store import save_credential, get_credential, delete_credential as delete_creds
 from known_hosts import check_host_key, accept_host_key, get_known_hosts, remove_host_key
 from terminal_manager import ConnectionManager
 from ssh_client import HostKeyUnknown
+from task_scheduler import run_task
 
 logger = logging.getLogger(__name__)
 api_bp = Blueprint("api", __name__)
@@ -255,6 +256,118 @@ def ssh_output(conn_id):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ============================================================
+# Scheduled Tasks (定时任务)
+# ============================================================
+
+def _validate_task_payload(data, partial=False, current_schedule_type=None):
+    """Validate task fields; returns (error_message, clean_fields)."""
+    from task_scheduler import _TIME_RE
+    fields = {}
+    if not partial or "name" in data:
+        fields["name"] = str(data.get("name", "")).strip()[:255]
+    if not partial or "session_id" in data:
+        sid = int(data.get("session_id", 0) or 0)
+        if not sid or Session.query.get(sid) is None:
+            return "请选择一个已保存的会话", None
+        fields["session_id"] = sid
+    if not partial or "command" in data:
+        command = str(data.get("command", "")).strip()
+        if not command:
+            return "命令不能为空", None
+        fields["command"] = command
+    if not partial or "schedule_type" in data:
+        st = data.get("schedule_type", "interval")
+        if st not in ("interval", "daily"):
+            return "调度类型无效", None
+        fields["schedule_type"] = st
+    # On partial updates the schedule type may not be in the payload; use
+    # the task's current type so sibling fields aren't wiped out.
+    sched = fields.get("schedule_type") or data.get("schedule_type") \
+        or current_schedule_type
+    if "interval_seconds" in data or not partial:
+        if sched == "interval":
+            try:
+                v = int(data.get("interval_seconds"))
+            except (TypeError, ValueError):
+                return "执行间隔无效", None
+            if v < 10:
+                return "执行间隔不能少于 10 秒", None
+            fields["interval_seconds"] = v
+        else:
+            fields["interval_seconds"] = None
+    if "daily_time" in data or not partial:
+        v = str(data.get("daily_time") or "").strip()
+        if sched == "daily":
+            if not _TIME_RE.match(v):
+                return "每天执行时间格式应为 HH:MM", None
+            fields["daily_time"] = v
+        else:
+            fields["daily_time"] = None
+    if "timeout_seconds" in data:
+        try:
+            v = int(data.get("timeout_seconds"))
+        except (TypeError, ValueError):
+            v = 300
+        fields["timeout_seconds"] = max(5, min(v, 86400))
+    if "enabled" in data:
+        fields["enabled"] = bool(data.get("enabled"))
+    return None, fields
+
+
+@api_bp.route("/api/tasks", methods=["GET"])
+def list_tasks():
+    tasks = ScheduledTask.query.order_by(ScheduledTask.id.desc()).all()
+    return jsonify({"success": True, "tasks": [t.to_dict() for t in tasks]})
+
+
+@api_bp.route("/api/tasks", methods=["POST"])
+def create_task():
+    data = request.get_json(force=True)
+    err, fields = _validate_task_payload(data)
+    if err:
+        return jsonify({"success": False, "error": err}), 400
+    task = ScheduledTask(**fields)
+    db.session.add(task)
+    db.session.commit()
+    return jsonify({"success": True, "task": task.to_dict()})
+
+
+@api_bp.route("/api/tasks/<int:task_id>", methods=["PUT"])
+def update_task(task_id):
+    task = ScheduledTask.query.get(task_id)
+    if task is None:
+        return jsonify({"success": False, "error": "任务不存在"}), 404
+    data = request.get_json(force=True)
+    err, fields = _validate_task_payload(data, partial=True,
+                                         current_schedule_type=task.schedule_type)
+    if err:
+        return jsonify({"success": False, "error": err}), 400
+    for k, v in fields.items():
+        setattr(task, k, v)
+    db.session.commit()
+    return jsonify({"success": True, "task": task.to_dict()})
+
+
+@api_bp.route("/api/tasks/<int:task_id>", methods=["DELETE"])
+def delete_task(task_id):
+    task = ScheduledTask.query.get(task_id)
+    if task is None:
+        return jsonify({"success": False, "error": "任务不存在"}), 404
+    db.session.delete(task)
+    db.session.commit()
+    return jsonify({"success": True})
+
+
+@api_bp.route("/api/tasks/<int:task_id>/run", methods=["POST"])
+def run_task_now(task_id):
+    task = ScheduledTask.query.get(task_id)
+    if task is None:
+        return jsonify({"success": False, "error": "任务不存在"}), 404
+    result = run_task(task)
+    return jsonify({"success": True, "result": result, "task": task.to_dict()})
 
 
 # ============================================================

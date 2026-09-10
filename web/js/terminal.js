@@ -298,14 +298,17 @@ const TerminalManager = {
         inst.termDiv.classList.add('active');
 
         if (this.splitMode) {
-            // Make sure the activated terminal occupies a pane; if it came
-            // from a tab (or is brand new), it takes the "other" pane next
-            // to the one the user was looking at.
+            // Make sure the activated terminal occupies a pane. A terminal
+            // activated from a tab click (or a brand-new connection) goes
+            // into the FOCUSED pane — the one the user was just looking at
+            // (the previous active terminal's pane) — while the other pane
+            // stays untouched. This keeps split panes stable when switching
+            // tabs instead of flipping both panes around.
             if (!this.splitPanes.includes(connId)) {
                 let idx = this.splitPanes.indexOf(null);
                 if (idx === -1) {
                     const prevIdx = this._prevActive ? this.splitPanes.indexOf(this._prevActive) : -1;
-                    idx = prevIdx === 0 ? 1 : 0;
+                    idx = prevIdx !== -1 ? prevIdx : 0;
                 }
                 this.splitPanes[idx] = connId;
             }
