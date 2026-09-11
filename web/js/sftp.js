@@ -492,6 +492,43 @@ const SFTPManager = {
         this._editorDirty = false;
     },
 
+    async newFile(parentPath) {
+        const fileName = prompt('文件名:', 'newfile.txt');
+        if (!fileName) return;
+        const fullPath = (parentPath.endsWith('/') ? parentPath : parentPath + '/') + fileName;
+        try {
+            await fetch('/api/sftp/touch/' + this.currentConnId, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({path: fullPath}),
+            });
+            // Check if browse dir is the parent
+            if (this.currentPath && fullPath.startsWith(this.currentPath)) {
+                this.browse(this.currentConnId, this.currentPath);
+            }
+        } catch (e) {
+            alert('创建文件失败: ' + e.message);
+        }
+    },
+
+    async newFolder(parentPath) {
+        const folderName = prompt('文件夹名:', 'newfolder');
+        if (!folderName) return;
+        const fullPath = (parentPath.endsWith('/') ? parentPath : parentPath + '/') + folderName;
+        try {
+            await fetch('/api/sftp/mkdir/' + this.currentConnId, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({path: fullPath}),
+            });
+            if (this.currentPath && fullPath.startsWith(this.currentPath)) {
+                this.browse(this.currentConnId, this.currentPath);
+            }
+        } catch (e) {
+            alert('创建文件夹失败: ' + e.message);
+        }
+    },
+
     async mkdir(connId) {
         const name = prompt('输入新目录名称:');
         if (!name) return;
@@ -559,6 +596,9 @@ const SFTPManager = {
 
         if (isDir) {
             menu.innerHTML = `
+                <div class="context-menu-item" data-action="newfile">新建文件</div>
+                <div class="context-menu-item" data-action="newfolder">新建文件夹</div>
+                <div class="context-menu-divider"></div>
                 <div class="context-menu-item" data-action="open">打开</div>
             `;
         } else {
@@ -574,7 +614,9 @@ const SFTPManager = {
         menu.querySelectorAll('.context-menu-item').forEach(item => {
             item.addEventListener('click', () => {
                 const action = item.dataset.action;
-                if (action === 'edit') this.editFile(filePath);
+                if (action === 'newfile') this.newFile(filePath);
+                else if (action === 'newfolder') this.newFolder(filePath);
+                else if (action === 'edit') this.editFile(filePath);
                 else if (action === 'download') this.download(filePath);
                 else if (action === 'delete') this.deleteFile(filePath, isDir);
                 else if (action === 'open') {

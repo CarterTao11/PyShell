@@ -586,6 +586,24 @@ def _sftp_mkdir_p(sftp, path):
                 sftp.stat(current)
 
 
+@api_bp.route("/api/sftp/touch/<conn_id>", methods=["POST"])
+def sftp_touch(conn_id):
+    """Create an empty file on remote via SFTP."""
+    data = request.get_json(force=True)
+    path = data.get("path", "")
+    if not path:
+        return jsonify({"success": False, "error": "No path provided"}), 400
+    try:
+        client = conn_mgr.get_connection(conn_id)
+        sftp = client.get_sftp_client()
+        with sftp.open(path, 'wb') as f:
+            f.write(b'')
+        return jsonify({"success": True, "path": path})
+    except Exception as e:
+        logger.exception(f"SFTP touch failed [{conn_id}]: {path}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @api_bp.route("/api/sftp/mkdir/<conn_id>", methods=["POST"])
 def sftp_mkdir(conn_id):
     data = request.get_json(force=True)
