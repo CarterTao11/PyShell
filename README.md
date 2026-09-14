@@ -19,6 +19,7 @@
 ```powershell
 # 单文件版（推荐分发）：dist\PyShell.exe，双击即启动并自动打开浏览器
 .\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --console --name PyShell --add-data "web;web" --paths backend backend\app.py
+pyinstaller  -i .\pyshell.ico --noconfirm --clean --onefile --windowed --name PyShell --add-data "web;web" --add-data "pyshell.ico;." --paths backend backend\app.py
 
 # 目录版（启动更快）：dist\PyShell\PyShell.exe + _internal\
 .\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --console --name PyShell --add-data "web;web" --paths backend backend\app.py
