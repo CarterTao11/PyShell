@@ -320,6 +320,69 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    // ===== 侧边栏宽度拖拽调整 =====
+    const SIDEBAR_MIN = 180;
+    const SIDEBAR_DEFAULT = 300;
+    const resizer = document.getElementById('sidebar-resizer');
+
+    function setSidebarWidth(px) {
+        const max = window.innerWidth - 280;   // 主区域至少保留 280px
+        const w = Math.round(Math.max(SIDEBAR_MIN, Math.min(px, max)));
+        document.documentElement.style.setProperty('--sidebar-w', w + 'px');
+        return w;
+    }
+
+    // 启动时恢复上次的宽度
+    try {
+        const saved = parseInt(localStorage.getItem('pyshell.sidebarWidth'), 10);
+        if (saved) setSidebarWidth(saved);
+    } catch (e) { /* localStorage 不可用时忽略 */ }
+
+    // 拖动中用 rAF 节流重排终端，拖完再同步一次 PTY 尺寸
+    let fitPending = false;
+    function refitTerminals() {
+        if (fitPending) return;
+        fitPending = true;
+        requestAnimationFrame(() => {
+            fitPending = false;
+            TerminalManager.fitVisible();
+        });
+    }
+
+    resizer.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const sidebar = document.getElementById('sidebar');
+        const startX = e.clientX;
+        const startW = sidebar.getBoundingClientRect().width;
+        resizer.classList.add('dragging');
+        document.body.classList.add('resizing');
+
+        const onMove = (ev) => {
+            setSidebarWidth(startW + (ev.clientX - startX));
+            refitTerminals();
+        };
+        const onUp = () => {
+            resizer.classList.remove('dragging');
+            document.body.classList.remove('resizing');
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            refitTerminals();
+            try {
+                const w = sidebar.getBoundingClientRect().width;
+                localStorage.setItem('pyshell.sidebarWidth', String(Math.round(w)));
+            } catch (err) { /* ignore */ }
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+
+    // 双击恢复默认宽度
+    resizer.addEventListener('dblclick', () => {
+        setSidebarWidth(SIDEBAR_DEFAULT);
+        refitTerminals();
+        try { localStorage.removeItem('pyshell.sidebarWidth'); } catch (e) { /* ignore */ }
+    });
+
     // Handle window beforeunload
     window.addEventListener('beforeunload', () => {
         TerminalManager.disconnectAll();

@@ -65,7 +65,7 @@ const SFTPManager = {
         const target = this.normalizePath(path || '/');
 
         document.querySelector('.sftp-empty').style.display = 'none';
-        document.getElementById('sftp-browser').style.display = 'block';
+        document.getElementById('sftp-browser').style.display = 'flex';
         this._syncPathInput(target);
 
         try {
