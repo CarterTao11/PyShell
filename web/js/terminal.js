@@ -155,12 +155,14 @@ const TerminalManager = {
             this._sendInput(connId, data);
         });
 
-        // Handle paste
+        // Handle paste / ctrl+c
+        // Ctrl+V：只拦截 xterm 自己的按键处理（否则 xterm 会把 Ctrl+V 当 0x16
+        // 控制符发给 shell），随后由浏览器默认粘贴触发 xterm 的原生 paste 事件，
+        // 经 onData 统一发送——只粘贴一次。之前这里还手动 readText() 发了一遍，
+        // 而自定义 handler 返回 false 并不会 preventDefault，浏览器默认粘贴
+        // 照常触发，两条路叠加导致内容被粘贴两遍。
         term.attachCustomKeyEventHandler((e) => {
             if (e.ctrlKey && e.key === 'v' && e.type === 'keydown') {
-                navigator.clipboard.readText().then(text => {
-                    this._sendInput(connId, text);
-                });
                 return false;
             }
             if (e.ctrlKey && e.key === 'c' && e.type === 'keydown') {
@@ -170,6 +172,25 @@ const TerminalManager = {
                 return false;
             }
             return true;
+        });
+
+        // 选中即复制（copy-on-select）
+        // 主路径：termDiv 上的 mouseup —— 同步调用、处于用户手势内，Clipboard
+        // API 不会因"缺少用户激活"被拒（Firefox 尤其严格）。
+        termDiv.addEventListener('mouseup', () => {
+            if (term.hasSelection()) this._copyToClipboard(term.getSelection());
+        });
+
+        // 兜底路径：onSelectionChange + 防抖 —— 覆盖在终端外松开鼠标、双击选词
+        // 等不以 termDiv mouseup 收尾的情况；连续变化只取最终选区。点击空白处
+        // 取消选区时 hasSelection 为 false，不会误复制。
+        let selCopyTimer = null;
+        term.onSelectionChange(() => {
+            clearTimeout(selCopyTimer);
+            selCopyTimer = setTimeout(() => {
+                if (!term.hasSelection()) return;
+                this._copyToClipboard(term.getSelection());
+            }, 200);
         });
 
         // Store instance
@@ -185,6 +206,21 @@ const TerminalManager = {
         this.activateTerminal(connId);
 
         term.open(termDiv);
+
+        // 兜底隐藏 xterm 的字符测量元素（内容为 32 个 "W"）。正常由
+        // vendor/xterm.css 的 .xterm-char-measure-element 规则隐藏，但若浏览器
+        // 缓存了坏的/旧的样式表，该规则缺失，元素会显示在终端顶部
+        // （.xterm-helpers 容器就在 top:0）。这里用内联样式强制隐藏：
+        // 内联样式优先级最高；visibility:hidden 不影响 offsetWidth，字符度量
+        // 功能不受影响。注意不能用 display:none——那会让测量结果变成 0。
+        const measureEl = termDiv.querySelector('.xterm-char-measure-element');
+        if (measureEl) {
+            measureEl.style.visibility = 'hidden';
+            measureEl.style.position = 'absolute';
+            measureEl.style.left = '-9999em';
+            measureEl.style.top = '0';
+        }
+
         this.fitVisible();
 
         // Update tab display
@@ -235,6 +271,31 @@ const TerminalManager = {
             headers: { 'Content-Type': 'text/plain' },
             body: data,
         }).catch(err => console.error('Send input error:', err));
+    },
+
+    /** 写剪贴板：优先 Clipboard API，被拒（如失去用户激活）时退回 execCommand */
+    _copyToClipboard(text) {
+        const done = () => console.info(`[PyShell] 已自动复制 ${text.length} 个字符`);
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done).catch(() => {
+                this._copyFallback(text) ? done() : console.warn('[PyShell] 自动复制失败（剪贴板被拒绝）');
+            });
+        } else {
+            this._copyFallback(text) ? done() : console.warn('[PyShell] 自动复制失败（剪贴板被拒绝）');
+        }
+    },
+
+    _copyFallback(text) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+        ta.remove();
+        return ok;
     },
 
     /**
