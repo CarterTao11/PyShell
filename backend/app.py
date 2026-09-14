@@ -132,6 +132,11 @@ def create_app():
     def index():
         return send_from_directory(web_dir, "index.html")
 
+    @app.route("/favicon.ico")
+    def favicon():
+        # 必须显式提供，否则会被下面的 SPA 兜底路由用 index.html 顶掉
+        return send_from_directory(web_dir, "favicon.ico")
+
     @app.route("/css/<path:filename>")
     def css_files(filename):
         return send_from_directory(os.path.join(web_dir, "css"), filename)
