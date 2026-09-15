@@ -312,6 +312,27 @@ body.resizing #main-content {
     border-color: var(--accent);
 }
 
+/* 工具栏按钮配色 */
+.tab-ctrl.blue { border-left: 3px solid #4dabf7; }
+.tab-ctrl.blue:hover { background: #4dabf722; }
+.tab-ctrl.blue.active { background: #4dabf7; border-color: #4dabf7; }
+
+.tab-ctrl.teal { border-left: 3px solid #38d9a9; }
+.tab-ctrl.teal:hover { background: #38d9a922; }
+.tab-ctrl.teal.active { background: #38d9a9; border-color: #38d9a9; }
+
+.tab-ctrl.purple { border-left: 3px solid #cc5de8; }
+.tab-ctrl.purple:hover { background: #cc5de822; }
+.tab-ctrl.purple.active { background: #cc5de8; border-color: #cc5de8; }
+
+.tab-ctrl.orange { border-left: 3px solid #ff922b; }
+.tab-ctrl.orange:hover { background: #ff922b22; }
+.tab-ctrl.orange.active { background: #ff922b; border-color: #ff922b; }
+
+.tab-ctrl.green { border-left: 3px solid #51cf66; }
+.tab-ctrl.green:hover { background: #51cf6622; }
+.tab-ctrl.green.active { background: #51cf66; border-color: #51cf66; }
+
 .terminal-tab {
     display: flex;
     align-items: center;
