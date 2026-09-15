@@ -392,4 +392,55 @@ document.addEventListener('DOMContentLoaded', async () => {
     setInterval(() => {
         SessionManager.load();
     }, 30000);
+
+    // ===== 邮件设置 =====
+    async function loadEmailSettings() {
+        const res = await fetch('/api/settings');
+        const data = await res.json();
+        if (data.smtp_server) document.getElementById('smtp-server').value = data.smtp_server;
+        if (data.smtp_port) document.getElementById('smtp-port').value = data.smtp_port;
+        if (data.smtp_user) document.getElementById('smtp-user').value = data.smtp_user;
+        if (data.smtp_pass) document.getElementById('smtp-pass').value = data.smtp_pass;
+        if (data.smtp_sender) document.getElementById('smtp-sender').value = data.smtp_sender;
+        if (data.smtp_recipients) document.getElementById('smtp-recipients').value = data.smtp_recipients;
+        if (data.smtp_enabled) document.getElementById('smtp-enabled').checked = data.smtp_enabled === '1';
+    }
+
+    document.getElementById('btn-save-email-settings').addEventListener('click', async () => {
+        const settings = {
+            smtp_server: document.getElementById('smtp-server').value,
+            smtp_port: document.getElementById('smtp-port').value,
+            smtp_user: document.getElementById('smtp-user').value,
+            smtp_pass: document.getElementById('smtp-pass').value,
+            smtp_sender: document.getElementById('smtp-sender').value,
+            smtp_recipients: document.getElementById('smtp-recipients').value,
+            smtp_enabled: document.getElementById('smtp-enabled').checked ? '1' : '0',
+            smtp_use_ssl: document.getElementById('smtp-port').value === '465' ? '1' : '0',
+        };
+        const res = await fetch('/api/settings', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(settings),
+        });
+        const result = await res.json();
+        document.getElementById('email-status').textContent = result.success ? '✅ 配置已保存' : '❌ 保存失败';
+        setTimeout(() => document.getElementById('email-status').textContent = '', 3000);
+    });
+
+    document.getElementById('btn-test-email').addEventListener('click', async () => {
+        // 先保存再测试
+        document.getElementById('btn-save-email-settings').click();
+        await new Promise(r => setTimeout(r, 500));
+        const res = await fetch('/api/settings/email/test', {method: 'POST'});
+        const result = await res.json();
+        const status = document.getElementById('email-status');
+        if (result.success) {
+            status.textContent = '✅ 测试邮件发送成功！请检查接收邮箱';
+        } else {
+            status.textContent = '❌ 发送失败: ' + (result.error || '未知错误');
+        }
+    });
+
+    // 切换到设置标签时加载配置
+    document.querySelector('[data-tab=settings]').addEventListener('click', loadEmailSettings);
 });

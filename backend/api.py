@@ -723,3 +723,14 @@ def update_settings():
             db.session.add(setting)
     db.session.commit()
     return jsonify({"success": True})
+
+
+@api_bp.route("/api/settings/email/test", methods=["POST"])
+def test_email():
+    """发送测试邮件验证配置"""
+    from email_notifier import send_email
+    result = send_email(
+        subject="[PyShell] 邮件配置测试",
+        body="这是一封测试邮件，如果您收到此邮件，说明邮件配置正确。PyShell SSH 客户端",
+    )
+    return jsonify(result)

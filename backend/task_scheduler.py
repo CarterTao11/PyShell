@@ -12,6 +12,7 @@ from datetime import datetime
 from models import db, Session, ScheduledTask
 from credential_store import get_credential
 from ssh_client import PySSHClient, HostKeyUnknown
+from email_notifier import notify_task_result, get_setting, KEY_SMTP_ENABLED
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +225,21 @@ def scheduler_loop(app):
                                     f"({task.name or task.command[:30]})")
                         res = run_task(task)
                         logger.info(f"Task {task.id} finished: {res['status']}")
+
+                        # 邮件通知
+                        if get_setting(KEY_SMTP_ENABLED, "0") == "1":
+                            try:
+                                session_name = f"{task.session.host}" if task.session else "未知"
+                                notify_task_result(
+                                    task_name=task.name or "",
+                                    command=task.command,
+                                    session_name=session_name,
+                                    status=res["status"],
+                                    exit_code=res.get("exit_code"),
+                                    output=res.get("output", "") or res.get("message", ""),
+                                )
+                            except Exception as e:
+                                logger.warning(f"发送邮件通知失败: {e}")
             except Exception:
                 logger.exception("Scheduler tick error")
             time.sleep(TICK_SECONDS)
