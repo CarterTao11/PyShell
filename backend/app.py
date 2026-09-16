@@ -42,7 +42,10 @@ _splash_progress = None  # 进度条信息
 
 def _show_splash():
     """显示启动画面（简洁可靠版本）"""
+    # 非打包模式或 macOS 系统不显示启动画面
     if not getattr(sys, "frozen", False):
+        return
+    if sys.platform == "darwin":
         return
     try:
         import tkinter as tk
