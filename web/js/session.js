@@ -130,21 +130,6 @@ const SessionManager = {
         const session = this.getById(sessionId);
         if (!session) return;
 
-        // 检查认证方式所需的凭证
-        if (session.auth_type === 'password' && !session.password) {
-            // 密码为空，提示用户先编辑会话填写密码
-            alert('请先编辑会话，填写密码后再连接');
-            this.openEditDialog(sessionId);
-            return;
-        }
-
-        if (session.auth_type === 'key' && !session.private_key) {
-            // 密钥为空，提示用户先编辑会话填写密钥
-            alert('请先编辑会话，填写私钥后再连接');
-            this.openEditDialog(sessionId);
-            return;
-        }
-
         // 键盘交互模式：弹出密码输入框
         if (session.auth_type === 'keyboard-interactive') {
             const password = await this._promptPassword(session.host, session.username);
@@ -152,7 +137,7 @@ const SessionManager = {
             session.password = password;
         }
 
-        // Get credentials from DB or prompt
+        // 密码和密钥模式：从数据库获取凭证（后端自动处理）
         const data = {
             session_id: sessionId,
             name: session.name || session.host,

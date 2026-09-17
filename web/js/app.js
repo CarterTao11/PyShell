@@ -191,7 +191,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 创建提示列表容器
     const suggestionPanel = document.createElement('div');
     suggestionPanel.id = 'cmd-suggestions';
-    suggestionPanel.style.cssText = 'position:absolute;display:none;z-index:1000;max-height:200px;overflow-y:auto;background:var(--bg);border:1px solid var(--border);border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,0.3);font-size:12px';
+    suggestionPanel.style.position = 'absolute';
+    suggestionPanel.style.display = 'none';
+    suggestionPanel.style.zIndex = '1000';
+    suggestionPanel.style.maxHeight = '200px';
+    suggestionPanel.style.overflowY = 'auto';
+    suggestionPanel.style.backgroundColor = '#1e1e2e';
+    suggestionPanel.style.border = '1px solid #3d3d5c';
+    suggestionPanel.style.borderRadius = '4px';
+    suggestionPanel.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)';
+    suggestionPanel.style.fontSize = '12px';
     document.getElementById('cmd-bar').appendChild(suggestionPanel);
 
     function showSuggestions(items) {
@@ -202,10 +211,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
         suggestionPanel.innerHTML = items.map((item, idx) => `
-            <div class="suggestion-item" data-idx="${idx}" style="padding:8px 12px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:monospace"
-                 title="${item.command}">
-                <span style="color:var(--text-muted)">${item.description || '无描述'}</span>
-                <span style="color:var(--accent)">${item.command}</span>
+            <div class="suggestion-item" data-idx="${idx}" style="padding:8px 12px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:monospace;background:#1e1e2e;color:#c0c0d0"
+                 title="${item.command}" onmouseover="this.style.background='#3d3d5c'" onmouseout="this.style.background='#1e1e2e'">
+                <span style="color:#888">${item.description || '无描述'}</span>
+                <span style="color:#6a9fff">${item.command}</span>
             </div>
         `).join('');
         // 定位到输入框下方
@@ -250,7 +259,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function updateSuggestionHighlight() {
         suggestionPanel.querySelectorAll('.suggestion-item').forEach((el, idx) => {
-            el.style.background = idx === selectedSuggestionIdx ? 'var(--highlight)' : '';
+            el.style.background = idx === selectedSuggestionIdx ? '#4a6cd4' : '#1e1e2e';
+            el.style.color = idx === selectedSuggestionIdx ? '#fff' : '#c0c0d0';
         });
     }
 
