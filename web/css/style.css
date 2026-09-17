@@ -410,9 +410,19 @@ body.resizing #main-content {
     display: block;
 }
 
+/* 四宫格模式下所有窗格都显示 */
+#terminal-container.split-4 .terminal-instance.pane-a,
+#terminal-container.split-4 .terminal-instance.pane-b,
+#terminal-container.split-4 .terminal-instance.pane-c,
+#terminal-container.split-4 .terminal-instance.pane-d {
+    display: block;
+}
+
 /* ===== 分屏布局 =====
    左右分屏: pane-a 在左, pane-b 在右
-   上下分屏: pane-a 在上, pane-b 在下 */
+   上下分屏: pane-a 在上, pane-b 在下
+   四宫格: pane-a 左上, pane-b 右上, pane-c 左下, pane-d 右下
+   统一用 left/right/top/bottom 百分比定位，避免与 base 的 left:0/right:0/top:0/bottom:0 冲突 */
 #terminal-container.split-v .terminal-instance.pane-a {
     display: block;
     right: 50%;
@@ -435,9 +445,39 @@ body.resizing #main-content {
     top: 50%;
 }
 
+/* 四宫格布局：绝对定位 + 百分比 */
+#terminal-container.split-4 .terminal-instance.pane-a {
+    display: block;
+    right: 50%;
+    bottom: 50%;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+}
+
+#terminal-container.split-4 .terminal-instance.pane-b {
+    display: block;
+    left: 50%;
+    bottom: 50%;
+    border-bottom: 1px solid var(--border);
+}
+
+#terminal-container.split-4 .terminal-instance.pane-c {
+    display: block;
+    right: 50%;
+    top: 50%;
+    border-right: 1px solid var(--border);
+}
+
+#terminal-container.split-4 .terminal-instance.pane-d {
+    display: block;
+    left: 50%;
+    top: 50%;
+}
+
 /* 分屏时高亮当前聚焦的窗格 */
 #terminal-container.split-v .terminal-instance.active,
-#terminal-container.split-h .terminal-instance.active {
+#terminal-container.split-h .terminal-instance.active,
+#terminal-container.split-4 .terminal-instance.active {
     box-shadow: inset 0 0 0 2px rgba(0, 122, 204, 0.45);
     z-index: 1;
 }

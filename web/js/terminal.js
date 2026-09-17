@@ -8,9 +8,11 @@ const TerminalManager = {
     connectedSessions: new Set(),  // sessionId set
     activeConnId: null,
     nextConnId: 1,
-    // 分屏状态: splitMode 为 'v'(左右) / 'h'(上下) / null(关闭)
-    splitMode: null,
-    splitPanes: [],            // [connId|null, connId|null] 当前占用两个窗格的终端
+    // 分屏状态: splitV 为 true 表示左右分屏, splitH 为 true 表示上下分屏
+    // 两者同时为 true 时表示四宫格
+    splitV: false,
+    splitH: false,
+    splitPanes: [],            // [connId|null, ...] 当前占用窗格的终端 (2或4个)
     _prevActive: null,
     _winResizeBound: false,
 
@@ -382,14 +384,14 @@ const TerminalManager = {
         });
         inst.termDiv.classList.add('active');
 
-        if (this.splitMode) {
-            // Make sure the activated terminal occupies a pane. A terminal
-            // activated from a tab click (or a brand-new connection) goes
-            // into the FOCUSED pane — the one the user was just looking at
-            // (the previous active terminal's pane) — while the other pane
-            // stays untouched. This keeps split panes stable when switching
-            // tabs instead of flipping both panes around.
+        const isSplit = this.splitV || this.splitH;
+        if (isSplit) {
+            // Make sure the activated terminal occupies a pane
             if (!this.splitPanes.includes(connId)) {
+                const maxPanes = (this.splitV && this.splitH) ? 4 : 2;
+                while (this.splitPanes.length < maxPanes) {
+                    this.splitPanes.push(null);
+                }
                 let idx = this.splitPanes.indexOf(null);
                 if (idx === -1) {
                     const prevIdx = this._prevActive ? this.splitPanes.indexOf(this._prevActive) : -1;
@@ -415,16 +417,27 @@ const TerminalManager = {
      * @param {'v'|'h'} mode 'v'=左右分屏, 'h'=上下分屏; 再次点击同一模式则关闭
      */
     setSplitMode(mode) {
-        if (this.splitMode === mode) {
-            mode = null;  // toggle off
+        // 切换各自分屏模式
+        if (mode === 'v') {
+            this.splitV = !this.splitV;
+        } else if (mode === 'h') {
+            this.splitH = !this.splitH;
         }
-        this.splitMode = mode;
 
-        if (this.splitMode) {
-            // Fill panes: active terminal first, then most recent other
-            const others = Array.from(this.instances.keys())
-                .filter(id => id !== this.activeConnId);
-            this.splitPanes = [this.activeConnId, others[0] || null];
+        // 计算当前分屏模式
+        const isSplitV = this.splitV;
+        const isSplitH = this.splitH;
+        const isSplit4 = isSplitV && isSplitH;
+        const isSplit = isSplitV || isSplitH;
+
+        // 重新构建 splitPanes 数组：按连接顺序排列，第1个在左/上，第2个在右/下
+        if (isSplit) {
+            const allConnIds = Array.from(this.instances.keys());
+            const maxPanes = isSplit4 ? 4 : 2;
+            this.splitPanes = allConnIds.slice(0, maxPanes);
+            while (this.splitPanes.length < maxPanes) {
+                this.splitPanes.push(null);
+            }
         } else {
             this.splitPanes = [];
         }
@@ -432,29 +445,64 @@ const TerminalManager = {
         // Update toggle buttons
         const bv = document.getElementById('btn-split-v');
         const bh = document.getElementById('btn-split-h');
-        if (bv) bv.classList.toggle('active', this.splitMode === 'v');
-        if (bh) bh.classList.toggle('active', this.splitMode === 'h');
+        if (bv) bv.classList.toggle('active', isSplitV);
+        if (bh) bh.classList.toggle('active', isSplitH);
 
         this._applyLayout();
     },
 
-    /** 根据 splitMode/splitPanes 给终端容器和窗格设置布局类并重新 fit */
+    /** 根据 splitV/splitH/splitPanes 给终端容器和窗格设置布局类并重新 fit */
     _applyLayout() {
         const container = document.getElementById('terminal-container');
         if (!container) return;
-        container.classList.toggle('split-v', this.splitMode === 'v');
-        container.classList.toggle('split-h', this.splitMode === 'h');
 
+        const isSplitV = this.splitV;
+        const isSplitH = this.splitH;
+        const isSplit4 = isSplitV && isSplitH;
+        const isSplit = isSplitV || isSplitH;
+
+        // 四宫格时只保留 split-4，避免 split-v/split-h 的定位规则与 split-4 冲突
+        container.classList.toggle('split-v', isSplitV && !isSplit4);
+        container.classList.toggle('split-h', isSplitH && !isSplit4);
+        container.classList.toggle('split-4', isSplit4);
+
+        // 移除所有窗格类和 active 类
         this.instances.forEach(inst => {
-            inst.termDiv.classList.remove('pane-a', 'pane-b');
+            inst.termDiv.classList.remove('pane-a', 'pane-b', 'pane-c', 'pane-d', 'active');
         });
-        if (this.splitMode) {
-            const [a, b] = this.splitPanes;
-            if (a && this.instances.has(a)) {
-                this.instances.get(a).termDiv.classList.add('pane-a');
+
+        if (isSplit) {
+            const maxPanes = isSplit4 ? 4 : 2;
+
+            // 清理无效的窗格项，保留 null 作为空位
+            this.splitPanes = this.splitPanes
+                .map(id => (id && this.instances.has(id) ? id : null))
+                .slice(0, maxPanes);
+            while (this.splitPanes.length < maxPanes) {
+                this.splitPanes.push(null);
             }
-            if (b && this.instances.has(b)) {
-                this.instances.get(b).termDiv.classList.add('pane-b');
+
+            // 把尚未分配的新终端填充到空窗格
+            for (const id of this.instances.keys()) {
+                if (this.splitPanes.includes(id)) continue;
+                const nullIdx = this.splitPanes.indexOf(null);
+                if (nullIdx === -1) break;
+                this.splitPanes[nullIdx] = id;
+            }
+
+            // pane-a: 左上/上, pane-b: 右上/右, pane-c: 左下, pane-d: 右下
+            const paneClasses = ['pane-a', 'pane-b', 'pane-c', 'pane-d'];
+            this.splitPanes.forEach((connId, idx) => {
+                if (connId && this.instances.has(connId)) {
+                    const inst = this.instances.get(connId);
+                    inst.termDiv.classList.add(paneClasses[idx]);
+                    inst.termDiv.classList.add('active');
+                }
+            });
+        } else {
+            // 非分屏模式：只显示当前活动终端
+            if (this.activeConnId && this.instances.has(this.activeConnId)) {
+                this.instances.get(this.activeConnId).termDiv.classList.add('active');
             }
         }
         this.fitVisible();
@@ -464,8 +512,7 @@ const TerminalManager = {
     fitVisible() {
         const container = document.getElementById('terminal-container');
         if (!container) return;
-        const isSplit = container.classList.contains('split-v')
-            || container.classList.contains('split-h');
+        const isSplit = this.splitV || this.splitH;
         let visible = [];
         if (isSplit) {
             visible = this.splitPanes.filter(id => id && this.instances.has(id));
@@ -491,8 +538,13 @@ const TerminalManager = {
             inst.eventSource.close();
         }
 
-        // Remove from connected sessions
-        this.connectedSessions.delete(inst.sessionId);
+        // Remove from connected sessions only when no other terminal
+        // is using the same session (same link can have multiple tabs)
+        const stillConnected = Array.from(this.instances.entries())
+            .some(([id, other]) => id !== connId && other.sessionId === inst.sessionId);
+        if (!stillConnected) {
+            this.connectedSessions.delete(inst.sessionId);
+        }
 
         // API disconnect
         try {
