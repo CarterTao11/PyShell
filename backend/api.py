@@ -7,7 +7,7 @@ import threading
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, Response, stream_with_context
 
-from models import db, Session, Credential, Setting, ScheduledTask
+from models import db, Session, Credential, Setting, ScheduledTask, CommandFavorite
 from credential_store import save_credential, get_credential, delete_credential as delete_creds
 from known_hosts import check_host_key, accept_host_key, get_known_hosts, remove_host_key
 from terminal_manager import ConnectionManager
@@ -734,3 +734,122 @@ def test_email():
         body="这是一封测试邮件，如果您收到此邮件，说明邮件配置正确。PyShell SSH 客户端",
     )
     return jsonify(result)
+
+
+# ============================================================
+# Command Favorites (命令收藏夹)
+# ============================================================
+
+@api_bp.route("/api/command-favorites", methods=["GET"])
+def list_command_favorites():
+    """获取所有收藏的命令"""
+    sort = request.args.get("sort", "use_count")
+
+    # 根据排序参数构建排序
+    if sort == "use_count":
+        order = CommandFavorite.use_count.desc()
+    elif sort == "updated_at":
+        order = CommandFavorite.updated_at.desc()
+    elif sort == "created_at":
+        order = CommandFavorite.created_at.desc()
+    elif sort == "command":
+        order = CommandFavorite.command.asc()
+    elif sort == "manual":
+        order = CommandFavorite.sort_order.asc()
+    else:
+        order = CommandFavorite.use_count.desc()
+
+    favorites = CommandFavorite.query.order_by(order).all()
+    return jsonify([f.to_dict() for f in favorites])
+
+
+@api_bp.route("/api/command-favorites/reorder", methods=["POST"])
+def reorder_command_favorites():
+    """手动调整收藏命令顺序"""
+    data = request.get_json(force=True)
+    order_ids = data.get("order", [])  # 按顺序排列的 ID 列表
+
+    for idx, fav_id in enumerate(order_ids):
+        fav = CommandFavorite.query.get(fav_id)
+        if fav:
+            fav.sort_order = idx
+
+    db.session.commit()
+    return jsonify({"success": True})
+
+
+@api_bp.route("/api/command-favorites", methods=["POST"])
+def create_command_favorite():
+    """添加收藏命令"""
+    data = request.get_json(force=True)
+    command = data.get("command", "").strip()
+    if not command:
+        return jsonify({"error": "命令不能为空"}), 400
+
+    # 检查是否已存在
+    existing = CommandFavorite.query.filter_by(command=command).first()
+    if existing:
+        existing.use_count += 1
+        existing.description = data.get("description", existing.description)
+        existing.tags = ",".join(data.get("tags", [])) if isinstance(data.get("tags"), list) else data.get("tags", "")
+        db.session.commit()
+        return jsonify(existing.to_dict())
+
+    favorite = CommandFavorite(
+        command=command,
+        description=data.get("description", ""),
+        tags=",".join(data.get("tags", [])) if isinstance(data.get("tags"), list) else data.get("tags", ""),
+    )
+    db.session.add(favorite)
+    db.session.commit()
+    return jsonify(favorite.to_dict()), 201
+
+
+@api_bp.route("/api/command-favorites/<int:favorite_id>", methods=["PUT"])
+def update_command_favorite(favorite_id):
+    """更新收藏命令"""
+    favorite = CommandFavorite.query.get_or_404(favorite_id)
+    data = request.get_json(force=True)
+
+    if "command" in data and data["command"].strip():
+        favorite.command = data["command"].strip()
+    if "description" in data:
+        favorite.description = data["description"]
+    if "tags" in data:
+        favorite.tags = ",".join(data["tags"]) if isinstance(data["tags"], list) else data["tags"]
+
+    db.session.commit()
+    return jsonify(favorite.to_dict())
+
+
+@api_bp.route("/api/command-favorites/<int:favorite_id>", methods=["DELETE"])
+def delete_command_favorite(favorite_id):
+    """删除收藏命令"""
+    favorite = CommandFavorite.query.get_or_404(favorite_id)
+    db.session.delete(favorite)
+    db.session.commit()
+    return jsonify({"success": True})
+
+
+@api_bp.route("/api/command-favorites/<int:favorite_id>/use", methods=["POST"])
+def use_command_favorite(favorite_id):
+    """使用收藏命令（增加使用次数）"""
+    favorite = CommandFavorite.query.get_or_404(favorite_id)
+    favorite.use_count += 1
+    db.session.commit()
+    return jsonify(favorite.to_dict())
+
+
+@api_bp.route("/api/command-favorites/search", methods=["GET"])
+def search_command_favorites():
+    """搜索收藏命令（用于自动补全）"""
+    query = request.args.get("q", "").strip()
+    if not query:
+        # 返回使用频率最高的命令
+        favorites = CommandFavorite.query.order_by(CommandFavorite.sort_order.asc()).limit(10).all()
+    else:
+        # 模糊搜索
+        favorites = CommandFavorite.query.filter(
+            CommandFavorite.command.like(f"%{query}%")
+        ).order_by(CommandFavorite.sort_order.asc()).limit(10).all()
+    return jsonify([f.to_dict() for f in favorites])

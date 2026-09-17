@@ -333,6 +333,10 @@ body.resizing #main-content {
 .tab-ctrl.green:hover { background: #51cf6622; }
 .tab-ctrl.green.active { background: #51cf66; border-color: #51cf66; }
 
+.tab-ctrl.yellow { border-left: 3px solid #fcc419; }
+.tab-ctrl.yellow:hover { background: #fcc41922; }
+.tab-ctrl.yellow.active { background: #fcc419; border-color: #fcc419; color: #1a1a1a; }
+
 .terminal-tab {
     display: flex;
     align-items: center;

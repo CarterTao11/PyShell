@@ -102,6 +102,7 @@
                     <button id="btn-cmd-mode" class="tab-ctrl purple" title="开启后，在下方输入命令回车，发送到所有打开的终端">命令模式</button>
                     <button id="btn-cmd-queue" class="tab-ctrl orange" title="命令队列：上一条执行完成后自动执行下一条">命令队列</button>
                     <button id="btn-tasks" class="tab-ctrl green" title="定时任务：定时连接某台机器执行命令（后端执行，关浏览器也有效）">定时任务</button>
+                    <button id="btn-favorites" class="tab-ctrl yellow" title="命令收藏夹：收藏常用命令，自动补全提示">收藏夹</button>
                 </div>
             </div>
             <div id="cmd-bar" class="hidden">
@@ -304,6 +305,42 @@
                         <span class="task-hint">由后端定时执行，浏览器关闭不影响；主机密钥未确认的会话请先手动连接一次</span>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 命令收藏夹弹窗 -->
+    <div id="favorites-overlay" class="dialog-overlay hidden">
+        <div class="dialog" style="width:520px;max-width:90vw">
+            <div class="dialog-header">
+                <h3>⭐ 命令收藏夹</h3>
+                <button class="dialog-close" id="btn-favorites-close" title="关闭">&times;</button>
+            </div>
+            <div class="dialog-body" style="padding:16px">
+                <div class="form-row" style="margin-bottom:12px">
+                    <div class="form-group" style="flex:1;margin-bottom:0">
+                        <input type="text" id="fav-command" placeholder="命令，如: ls -la /var/log"
+                               spellcheck="false" autocomplete="off">
+                    </div>
+                    <div class="form-group" style="width:150px;margin-bottom:0">
+                        <input type="text" id="fav-description" placeholder="描述（可选）">
+                    </div>
+                    <button id="btn-add-favorite" class="btn btn-sm btn-primary" style="height:34px;align-self:flex-end">添加</button>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+                    <span style="color:var(--text-muted);font-size:12px">共 <span id="fav-count">0</span> 条收藏</span>
+                    <div style="display:flex;gap:4px;align-items:center">
+                        <span style="color:var(--text-muted);font-size:11px">排序：</span>
+                        <select id="fav-sort" style="padding:4px 8px;font-size:12px;background:var(--bg-primary);border:1px solid var(--border);color:var(--text-primary);border-radius:4px">
+                            <option value="manual">手动排序</option>
+                            <option value="use_count">使用次数</option>
+                            <option value="updated_at">最近使用</option>
+                            <option value="created_at">创建时间</option>
+                            <option value="command">命令名称</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="favorites-list" class="list-container" style="max-height:280px;overflow-y:auto"></div>
             </div>
         </div>
     </div>

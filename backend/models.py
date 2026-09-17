@@ -120,3 +120,30 @@ class ScheduledTask(db.Model):
             "last_exit_code": self.last_exit_code,
             "last_output": self.last_output,
         }
+
+
+class CommandFavorite(db.Model):
+    """命令收藏夹 - 存储常用命令"""
+    __tablename__ = "command_favorites"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    command = db.Column(db.Text, nullable=False, default="")  # 命令内容
+    description = db.Column(db.String(255), nullable=False, default="")  # 命令描述
+    tags = db.Column(db.String(512), nullable=False, default="")  # 标签（逗号分隔）
+    use_count = db.Column(db.Integer, nullable=False, default=0)  # 使用次数
+    sort_order = db.Column(db.Integer, nullable=False, default=0)  # 排序顺序（越小越靠前）
+    created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc),
+                           onupdate=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "command": self.command,
+            "description": self.description,
+            "tags": self.tags.split(",") if self.tags else [],
+            "use_count": self.use_count,
+            "sort_order": self.sort_order,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }

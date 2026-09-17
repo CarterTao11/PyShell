@@ -162,6 +162,16 @@ const TerminalManager = {
         // 而自定义 handler 返回 false 并不会 preventDefault，浏览器默认粘贴
         // 照常触发，两条路叠加导致内容被粘贴两遍。
         term.attachCustomKeyEventHandler((e) => {
+            // 当收藏夹弹框显示时，拦截方向键、回车、Esc
+            const favPanel = document.getElementById('terminal-fav-panel');
+            if (favPanel && favPanel.style.display !== 'none') {
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp' ||
+                    e.key === 'Enter' || e.key === 'Escape' || e.key === 'Tab' ||
+                    (e.ctrlKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp'))) {
+                    return false; // 阻止 xterm 处理，让 document 事件处理
+                }
+            }
+
             if (e.ctrlKey && e.key === 'v' && e.type === 'keydown') {
                 return false;
             }
@@ -169,6 +179,20 @@ const TerminalManager = {
                 // Let xterm handle copy if selection exists
                 if (term.hasSelection()) return true;
                 this._sendInput(connId, '\x03');
+                return false;
+            }
+            // Ctrl+M 触发收藏命令选择器
+            if (e.ctrlKey && e.key === 'm' && e.type === 'keydown') {
+                // 获取终端容器的位置
+                const termContainer = document.getElementById('terminal-container');
+                const rect = termContainer ? termContainer.getBoundingClientRect() : { left: 0, top: 0, width: 400, height: 300 };
+                // 触发自定义事件，传递位置信息
+                window.dispatchEvent(new CustomEvent('show-favorites', {
+                    detail: {
+                        x: rect.left + rect.width / 2,
+                        y: rect.top + rect.height / 2
+                    }
+                }));
                 return false;
             }
             return true;
