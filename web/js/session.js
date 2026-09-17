@@ -130,6 +130,28 @@ const SessionManager = {
         const session = this.getById(sessionId);
         if (!session) return;
 
+        // 检查认证方式所需的凭证
+        if (session.auth_type === 'password' && !session.password) {
+            // 密码为空，提示用户先编辑会话填写密码
+            alert('请先编辑会话，填写密码后再连接');
+            this.openEditDialog(sessionId);
+            return;
+        }
+
+        if (session.auth_type === 'key' && !session.private_key) {
+            // 密钥为空，提示用户先编辑会话填写密钥
+            alert('请先编辑会话，填写私钥后再连接');
+            this.openEditDialog(sessionId);
+            return;
+        }
+
+        // 键盘交互模式：弹出密码输入框
+        if (session.auth_type === 'keyboard-interactive') {
+            const password = await this._promptPassword(session.host, session.username);
+            if (!password) return; // 用户取消
+            session.password = password;
+        }
+
         // Get credentials from DB or prompt
         const data = {
             session_id: sessionId,
@@ -138,12 +160,10 @@ const SessionManager = {
             port: session.port,
             username: session.username,
             auth_type: session.auth_type,
+            password: session.password,
+            private_key: session.private_key,
+            passphrase: session.passphrase,
         };
-
-        // If password-based, prompt for password if not stored
-        if (session.auth_type === 'password') {
-            // We'll let the backend handle loading credentials
-        }
 
         await TerminalManager.connect(sessionId, data);
         this.render();
@@ -241,5 +261,74 @@ const SessionManager = {
         }
 
         document.getElementById('dialog-overlay').classList.add('hidden');
+    },
+
+    // 弹出密码输入框（键盘交互模式）
+    _promptPassword(host, username) {
+        return new Promise((resolve) => {
+            // 创建临时弹框
+            const overlay = document.createElement('div');
+            overlay.className = 'dialog-overlay';
+            overlay.style.cssText = 'display:flex;align-items:center;justify-content:center;z-index:10000';
+
+            overlay.innerHTML = `
+                <div class="dialog" style="width:360px">
+                    <div class="dialog-header">
+                        <h3>键盘交互认证</h3>
+                    </div>
+                    <div class="dialog-body">
+                        <p style="margin-bottom:12px;color:var(--text-secondary)">
+                            连接到 <strong>${host}</strong> (${username})<br>
+                            请输入密码：
+                        </p>
+                        <input type="password" id="kbd-password-input"
+                               placeholder="密码"
+                               style="width:100%;padding:10px;font-size:14px;border:1px solid var(--border);border-radius:4px;background:var(--bg-primary);color:var(--text-primary)">
+                    </div>
+                    <div class="dialog-footer">
+                        <button id="kbd-connect-btn" class="btn btn-primary">连接</button>
+                        <button id="kbd-cancel-btn" class="btn">取消</button>
+                    </div>
+                </div>
+            `;
+
+            document.body.appendChild(overlay);
+
+            const input = overlay.querySelector('#kbd-password-input');
+            const connectBtn = overlay.querySelector('#kbd-connect-btn');
+            const cancelBtn = overlay.querySelector('#kbd-cancel-btn');
+
+            // 回车连接
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    resolve(input.value);
+                    overlay.remove();
+                } else if (e.key === 'Escape') {
+                    resolve(null);
+                    overlay.remove();
+                }
+            });
+
+            connectBtn.addEventListener('click', () => {
+                resolve(input.value);
+                overlay.remove();
+            });
+
+            cancelBtn.addEventListener('click', () => {
+                resolve(null);
+                overlay.remove();
+            });
+
+            // 点击遮罩取消
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) {
+                    resolve(null);
+                    overlay.remove();
+                }
+            });
+
+            // 自动聚焦输入框
+            setTimeout(() => input.focus(), 100);
+        });
     }
 };
