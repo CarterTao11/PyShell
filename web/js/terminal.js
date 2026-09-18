@@ -33,7 +33,7 @@ const TerminalManager = {
             const fp = result.fingerprint || '';
             const accepted = await this._confirmHostKey(fp);
             if (!accepted) {
-                alert('已取消连接');
+                showToast('已取消连接', 'warning');
                 return false;
             }
             // User accepted, save host key and retry connection
@@ -46,13 +46,13 @@ const TerminalManager = {
             });
             const retryResult = await retryRes.json();
             if (!retryResult.success) {
-                alert('连接失败: ' + (retryResult.error || '未知错误'));
+                showToast('连接失败: ' + (retryResult.error || '未知错误'), 'error');
                 return false;
             }
             // Use the retry connection result
             Object.assign(result, retryResult);
         } else if (!result.success) {
-            alert('连接失败: ' + (result.error || '未知错误'));
+            showToast('连接失败: ' + (result.error || '未知错误'), 'error');
             return false;
         }
 
@@ -66,7 +66,7 @@ const TerminalManager = {
             this.activateTerminal(actualConnId);
         } catch (e) {
             console.error('Terminal init failed:', e);
-            alert('终端初始化失败: ' + (e && e.message ? e.message : e));
+            showToast('终端初始化失败: ' + (e && e.message ? e.message : e), 'error');
             return false;
         }
 

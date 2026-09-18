@@ -111,7 +111,7 @@ const TaskManager = {
                 await this.refresh();
             }
         } catch (e) {
-            alert('操作失败: ' + e.message);
+            showToast('操作失败: ' + e.message, 'error');
             this.refresh();
         }
     },
@@ -232,7 +232,7 @@ const TaskManager = {
                     body: JSON.stringify({ enabled: cb.checked }),
                 });
             } catch (err) {
-                alert('操作失败: ' + err.message);
+                showToast('操作失败: ' + err.message, 'error');
             }
             this.refresh();
         });

@@ -41,7 +41,7 @@ const SFTPManager = {
     /** 返回上一级目录 */
     goUp() {
         if (!this.currentConnId) {
-            alert('请先连接一个终端');
+            showToast('请先连接一个终端', 'warning');
             return;
         }
         const parent = this._parentOf(this.currentPath);
@@ -52,7 +52,7 @@ const SFTPManager = {
     /** 直接跳转到输入的路径 */
     goTo(path) {
         if (!this.currentConnId) {
-            alert('请先连接一个终端');
+            showToast('请先连接一个终端', 'warning');
             return;
         }
         const p = (path || '').trim();
@@ -73,7 +73,7 @@ const SFTPManager = {
             const result = await res.json();
 
             if (!result.success) {
-                alert('SFTP 错误: ' + result.error);
+                showToast('SFTP 错误: ' + result.error, 'error');
                 // 目录切换失败：保持显示上一个有效目录
                 this._syncPathInput();
                 return;
@@ -200,7 +200,7 @@ const SFTPManager = {
 
     async upload(connId, files) {
         if (!connId) {
-            alert('请先连接一个终端');
+            showToast('请先连接一个终端', 'warning');
             return;
         }
 
@@ -244,12 +244,12 @@ const SFTPManager = {
                 });
                 const r = await res.json();
                 if (!r.success) {
-                    alert(`创建目录失败: ${d} — ${r.error || '未知错误'}`);
+                    showToast(`创建目录失败: ${d} — ${r.error || '未知错误'}`, 'error');
                     if (status) status.textContent = '';
                     return;
                 }
             } catch (err) {
-                alert('创建目录错误: ' + err.message);
+                showToast('创建目录错误: ' + err.message, 'error');
                 if (status) status.textContent = '';
                 return;
             }
@@ -273,17 +273,20 @@ const SFTPManager = {
                 });
                 const result = await res.json();
                 if (!result.success) {
-                    alert(`上传失败: ${e.relPath} — ${result.error || '未知错误'}`);
+                    showToast(`上传失败: ${e.relPath} — ${result.error || '未知错误'}`, 'error');
                     break;
                 }
                 ok++;
             }
             if (status) {
                 status.textContent = ok > 0 ? `已上传/覆盖 ${ok} 个文件` : '';
-                if (ok > 0) setTimeout(() => { status.textContent = ''; }, 3000);
+                if (ok > 0) {
+                    showToast(`已上传 ${ok} 个文件`, 'success');
+                    setTimeout(() => { status.textContent = ''; }, 3000);
+                }
             }
         } catch (err) {
-            alert('上传错误: ' + err.message);
+            showToast('上传错误: ' + err.message, 'error');
             if (status) status.textContent = '';
         } finally {
             this.browse(connId, this.currentPath);
@@ -293,7 +296,7 @@ const SFTPManager = {
     /** 上传整个文件夹（保留内部目录结构，同名文件直接覆盖） */
     async uploadFolder(connId) {
         if (!connId) {
-            alert('请先连接一个终端');
+            showToast('请先连接一个终端', 'warning');
             return;
         }
         const input = document.createElement('input');
@@ -360,7 +363,7 @@ const SFTPManager = {
             e.preventDefault();
             list.classList.remove('dragover');
             if (!this.currentConnId) {
-                alert('请先连接一个终端');
+                showToast('请先连接一个终端', 'warning');
                 return;
             }
 
@@ -400,7 +403,7 @@ const SFTPManager = {
             const res = await fetch(`/api/sftp/download/${connId}?path=${encodeURIComponent(filePath)}`);
             if (!res.ok) {
                 const err = await res.json();
-                alert('下载失败: ' + (err.error || ''));
+                showToast('下载失败: ' + (err.error || ''), 'error');
                 return;
             }
 
@@ -413,7 +416,7 @@ const SFTPManager = {
             a.click();
             URL.revokeObjectURL(url);
         } catch (err) {
-            alert('下载错误: ' + err.message);
+            showToast('下载错误: ' + err.message, 'error');
         }
     },
 
@@ -423,7 +426,7 @@ const SFTPManager = {
 
     async editFile(path) {
         if (!this.currentConnId) {
-            alert('请先连接一个终端');
+            showToast('请先连接一个终端', 'warning');
             return;
         }
         const overlay = document.getElementById('editor-overlay');
@@ -444,7 +447,7 @@ const SFTPManager = {
             const result = await res.json();
             if (!result.success) {
                 overlay.classList.add('hidden');
-                alert(`无法打开文件: ${result.error}\n请求路径: ${path}`);
+                showToast(`无法打开文件: ${result.error}`, 'error');
                 return;
             }
             this._editingPath = path;
@@ -454,7 +457,7 @@ const SFTPManager = {
                 `${this._formatSize(result.size)} · UTF-8 · 保存时直接覆盖原文件`;
         } catch (err) {
             overlay.classList.add('hidden');
-            alert('读取文件错误: ' + err.message);
+            showToast('读取文件错误: ' + err.message, 'error');
         }
     },
 
@@ -472,16 +475,17 @@ const SFTPManager = {
             const result = await res.json();
             if (!result.success) {
                 status.textContent = '';
-                alert('保存失败: ' + result.error);
+                showToast('保存失败: ' + result.error, 'error');
                 return;
             }
             this._editorDirty = false;
             status.textContent = `已保存 ${new Date().toLocaleTimeString()}（覆盖原文件）`;
+            showToast('文件已保存', 'success');
             // 刷新列表以更新修改时间
             if (this.currentConnId) this.browse(this.currentConnId, this.currentPath);
         } catch (err) {
             status.textContent = '';
-            alert('保存错误: ' + err.message);
+            showToast('保存错误: ' + err.message, 'error');
         }
     },
 
@@ -497,17 +501,23 @@ const SFTPManager = {
         if (!fileName) return;
         const fullPath = (parentPath.endsWith('/') ? parentPath : parentPath + '/') + fileName;
         try {
-            await fetch('/api/sftp/touch/' + this.currentConnId, {
+            const res = await fetch('/api/sftp/touch/' + this.currentConnId, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({path: fullPath}),
             });
+            const result = await res.json();
+            if (!result.success) {
+                showToast('创建文件失败: ' + result.error, 'error');
+                return;
+            }
             // Check if browse dir is the parent
             if (this.currentPath && fullPath.startsWith(this.currentPath)) {
                 this.browse(this.currentConnId, this.currentPath);
             }
+            showToast('文件已创建', 'success');
         } catch (e) {
-            alert('创建文件失败: ' + e.message);
+            showToast('创建文件失败: ' + e.message, 'error');
         }
     },
 
@@ -516,16 +526,22 @@ const SFTPManager = {
         if (!folderName) return;
         const fullPath = (parentPath.endsWith('/') ? parentPath : parentPath + '/') + folderName;
         try {
-            await fetch('/api/sftp/mkdir/' + this.currentConnId, {
+            const res = await fetch('/api/sftp/mkdir/' + this.currentConnId, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({path: fullPath}),
             });
+            const result = await res.json();
+            if (!result.success) {
+                showToast('创建文件夹失败: ' + result.error, 'error');
+                return;
+            }
             if (this.currentPath && fullPath.startsWith(this.currentPath)) {
                 this.browse(this.currentConnId, this.currentPath);
             }
+            showToast('文件夹已创建', 'success');
         } catch (e) {
-            alert('创建文件夹失败: ' + e.message);
+            showToast('创建文件夹失败: ' + e.message, 'error');
         }
     },
 
@@ -545,11 +561,12 @@ const SFTPManager = {
             const result = await res.json();
             if (result.success) {
                 this.browse(connId, this.currentPath);
+                showToast('目录已创建', 'success');
             } else {
-                alert('创建目录失败: ' + result.error);
+                showToast('创建目录失败: ' + result.error, 'error');
             }
         } catch (err) {
-            alert('创建目录错误: ' + err.message);
+            showToast('创建目录错误: ' + err.message, 'error');
         }
     },
 
@@ -565,11 +582,12 @@ const SFTPManager = {
             const result = await res.json();
             if (result.success) {
                 this.browse(this.currentConnId, this.currentPath);
+                showToast(isDir ? '目录已删除' : '文件已删除', 'success');
             } else {
-                alert('删除失败: ' + result.error);
+                showToast('删除失败: ' + result.error, 'error');
             }
         } catch (err) {
-            alert('删除错误: ' + err.message);
+            showToast('删除错误: ' + err.message, 'error');
         }
     },
 

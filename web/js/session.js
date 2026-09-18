@@ -23,8 +23,13 @@ const SessionManager = {
             body: JSON.stringify(data),
         });
         const session = await res.json();
+        if (session.success === false) {
+            showToast('创建失败: ' + session.error, 'error');
+            return null;
+        }
         this.sessions.push(session);
         this.render();
+        showToast('会话已创建', 'success');
         return session;
     },
 
@@ -35,16 +40,27 @@ const SessionManager = {
             body: JSON.stringify(data),
         });
         const session = await res.json();
+        if (session.success === false) {
+            showToast('保存失败: ' + session.error, 'error');
+            return null;
+        }
         const idx = this.sessions.findIndex(s => s.id === id);
         if (idx >= 0) this.sessions[idx] = session;
         this.render();
+        showToast('会话已保存', 'success');
         return session;
     },
 
     async delete(id) {
-        await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+        const res = await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+        const result = await res.json();
+        if (result.success === false) {
+            showToast('删除失败: ' + result.error, 'error');
+            return;
+        }
         this.sessions = this.sessions.filter(s => s.id !== id);
         this.render();
+        showToast('会话已删除', 'success');
     },
 
     getById(id) {
@@ -235,7 +251,7 @@ const SessionManager = {
         };
 
         if (!data.host) {
-            alert('请输入主机地址');
+            showToast('请输入主机地址', 'warning');
             return;
         }
 

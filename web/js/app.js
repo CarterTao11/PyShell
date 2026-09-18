@@ -3,6 +3,28 @@
  * Initializes event handlers and global state.
  */
 
+// ===== Toast 提示函数 =====
+function showToast(message, type = 'info', duration) {
+    // 错误类型消息显示6秒，其他3秒
+    if (duration === undefined) {
+        duration = (type === 'error') ? 6000 : 3000;
+    }
+
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+
+    // 3秒后自动关闭
+    setTimeout(() => {
+        toast.style.animation = 'toast-out 0.3s ease';
+        setTimeout(() => toast.remove(), 300);
+    }, duration);
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     // Load sessions
     await SessionManager.load();
@@ -554,7 +576,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     async function executeFavoriteCommand(favorite) {
         if (!favorite || !TerminalManager.activeConnId) {
-            alert('没有活动的终端连接');
+            showToast('没有活动的终端连接', 'warning');
             return;
         }
         // 发送命令到终端（通过 API）
@@ -878,8 +900,14 @@ document.addEventListener('DOMContentLoaded', async () => {
                     e.stopPropagation();
                     const id = e.target.closest('.favorite-item').dataset.id;
                     if (confirm('确定删除这条收藏命令？')) {
-                        await fetch(`/api/command-favorites/${id}`, { method: 'DELETE' });
-                        this.load();
+                        const res = await fetch(`/api/command-favorites/${id}`, { method: 'DELETE' });
+                        const result = await res.json();
+                        if (result.success === false) {
+                            showToast('删除失败: ' + result.error, 'error');
+                        } else {
+                            this.load();
+                            showToast('命令已删除', 'success');
+                        }
                     }
                 });
             });
@@ -951,7 +979,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const command = document.getElementById('fav-command').value.trim();
             const description = document.getElementById('fav-description').value.trim();
             if (!command) {
-                alert('请输入命令');
+                showToast('请输入命令', 'warning');
                 return;
             }
             const res = await fetch('/api/command-favorites', {
@@ -963,6 +991,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 document.getElementById('fav-command').value = '';
                 document.getElementById('fav-description').value = '';
                 this.load();
+                showToast('命令已添加收藏', 'success');
+            } else {
+                const err = await res.json();
+                showToast('添加收藏失败: ' + (err.error || '未知错误'), 'error');
             }
         },
 
