@@ -76,10 +76,12 @@ class TerminalSession:
         """
         with self._out_ready:
             self._out_buf.extend(data)
-            overflow = len(self._out_buf) - self.MAX_OUTPUT_BUFFER
-            if overflow > 0:
-                del self._out_buf[:overflow]
-                self.dropped_bytes += overflow
+            if len(self._out_buf) > self.MAX_OUTPUT_BUFFER:
+                # 一次多丢一些（回到半水位），否则每来一个 64KB 就要整体搬 8MB
+                # 内存、白白烧 CPU；按块批量截断后摊销成本可以忽略
+                trim = len(self._out_buf) - self.MAX_OUTPUT_BUFFER // 2
+                del self._out_buf[:trim]
+                self.dropped_bytes += trim
             self._out_ready.notify_all()
 
     def write(self, data: str):
