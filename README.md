@@ -122,6 +122,8 @@ pyshell/
 | GET    | /api/status                 | 系统状态       |
 | GET    | /api/settings               | 获取设置       |
 | PUT    | /api/settings               | 更新设置       |
+| POST   | /api/ui/ping                | 页面在线心跳   |
+| POST   | /api/ssh/ack/:conn_id       | 输出消费确认（流控） |
 
 ## 注意
 
@@ -139,6 +141,13 @@ pyshell/
   - 前端：一条有界队列（上限 4MB，`OUTPUT_HIGH_WATER`），一次只 `term.write` 一块、等 xterm 解析回调再写下一块（这是对 xterm 唯一的背压手段），超水位同样丢最旧的；
   - 丢弃不会被"吞掉"：累计到 1MB 就在终端里打印一行黄色提示 `[输出过快，浏览器来不及渲染，已丢弃约 X MB 未显示]`，并先做一次 `\x1b[0m` 复位，防止被切断的转义序列把整屏染色。
   - 也就是说，盯着尾部日志看没问题；**如果你需要完整日志，请用 `docker logs ... > file` 落盘再看**，不要在终端里跑无限量的流。
+- **不会再重复开标签页**：每次执行 `python backend/app.py` 时，如果端口上已有实例，程序原本会再 `webbrowser.open()` 一次，于是每重复启动一次就多一个标签页（Chrome 里一个标签页就是一个 renderer 进程，几十 MB 起步）。现在前端每 20 秒向 `POST /api/ui/ping` 发一次心跳，时间戳落到 `data/ui_last_seen`（写盘节流 10 秒）；启动时若 30 秒内还有页面在活动，就跳过打开浏览器并记一行日志 `跳过打开浏览器（避免重复标签页）`。页面侧如果连续两次心跳失败（说明后台重启过、自己已失联），会自己 `location.reload()` 一次重新接上。想强制每次都开新标签页，设 `PYSHELL_NO_BROWSER` 之外还可以直接删掉 `data/ui_last_seen`。
+- 关于"开个 pyshell 就十几个浏览器进程、一个多 G"：这是 Chrome 自己的进程模型，不是页面代码造成的。同一台机器实测（全新 profile、只留一个标签页）——
+  | 场景 | 进程数 | 浏览器总占用 |
+  | --- | --- | --- |
+  | `about:blank` 空白页 | 10 | 764 MB |
+  | 打开 PyShell 页面 | 11 | 766 MB |
+  其中 1 个 browser（≈200MB）、1 个 GPU（≈190MB）、2 个 utility（网络/存储）、1 个 crashpad 是 Chrome 的固定开销，其余 renderer 是"一个标签页/一个扩展一个进程"。所以真正能压下去的是：别让标签页越堆越多（上面的心跳机制）、关掉不用的标签页、禁用用不到的扩展、以及关掉硬件加速（GPU 进程能省下约 190MB，代价是滚动略慢）。
 - 凭据加密在 Windows 下使用 DPAPI (用户级加密)，其他平台降级为 base64 编码
 - 数据库文件存储在 `data/pyshell.db`
 - 默认监听 `127.0.0.1`，仅本地访问

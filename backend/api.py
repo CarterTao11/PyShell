@@ -13,6 +13,7 @@ from known_hosts import check_host_key, accept_host_key, get_known_hosts, remove
 from terminal_manager import ConnectionManager
 from ssh_client import HostKeyUnknown
 from task_scheduler import run_task
+import ui_presence
 
 logger = logging.getLogger(__name__)
 api_bp = Blueprint("api", __name__)
@@ -20,6 +21,18 @@ conn_mgr = ConnectionManager()
 
 # Lock for SSE output to prevent overlapping reads
 _sse_locks = {}
+
+
+@api_bp.before_request
+def _mark_ui_presence():
+    """任何来自页面的请求都算"页面还开着"，启动时据此决定要不要再开标签页"""
+    ui_presence.touch()
+
+
+@api_bp.route("/api/ui/ping", methods=["POST", "GET"])
+def ui_ping():
+    """前端心跳：只为证明页面还活着（服务端已在 before_request 里记时间戳）"""
+    return jsonify({"success": True})
 
 
 def _generate_conn_id():
@@ -233,6 +246,7 @@ def ssh_disconnect():
 @api_bp.route("/api/ssh/output/<conn_id>")
 def ssh_output(conn_id):
     """SSE endpoint for streaming terminal output."""
+
     def generate():
         try:
             terminal = conn_mgr.get_terminal(conn_id)
@@ -248,8 +262,25 @@ def ssh_output(conn_id):
 
         reported_dropped = 0
         idle_ticks = 0
+        credit_misses = 0
+        credit_enforced = True
         while True:
             try:
+                # 端到端流控：等到"已发 - 已确认"回到窗口内再继续推。
+                # SSE 没有协议级流控，不这样做的话浏览器一卡，事件就全堆在它的
+                # 消息队列里，内存照样无限涨（docker logs -f / docker build 都会命中）。
+                if credit_enforced:
+                    if not terminal.wait_credit(timeout=0.5):
+                        credit_misses += 1
+                        # 浏览器一直不确认（旧缓存版本、ack 请求失败等）时不能把终端
+                        # 冻死：等够 5 秒就降级成不限流，靠 8MB 缓冲 + 丢弃兜底
+                        if credit_misses >= 10:
+                            credit_enforced = False
+                            logger.warning(
+                                "SSE ack timeout [%s]: 浏览器未回确认，降级为不限流", conn_id)
+                        continue
+                    credit_misses = 0
+
                 # 有数据就尽量连着取（每次最多 READ_CHUNK），把刷屏合并成大块再发；
                 # 取不到才退化成心跳，避免浏览器被几千个事件/秒打爆
                 data = terminal.read_output(timeout=0.2)
@@ -262,6 +293,7 @@ def ssh_output(conn_id):
                         if not more:
                             break
                         data += more
+                    terminal.note_sent(len(data))
                     yield f"data: {base64.b64encode(data).decode('ascii')}\n\n"
                     # 后端因为浏览器跟不上而丢过字节：明确告诉前端，别让用户以为看漏了
                     dropped = getattr(terminal, "dropped_bytes", 0)
@@ -294,6 +326,23 @@ def ssh_output(conn_id):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@api_bp.route("/api/ssh/ack/<conn_id>", methods=["POST"])
+def ssh_ack(conn_id):
+    """浏览器确认已消费的字节数（端到端流控，body 是纯十进制数字）"""
+    try:
+        terminal = conn_mgr.get_terminal(conn_id)
+    except KeyError:
+        return jsonify({"success": False, "error": "Connection not found"}), 404
+    try:
+        n = int((request.get_data(as_text=True) or "0").strip() or "0")
+    except ValueError:
+        return jsonify({"success": False, "error": "invalid byte count"}), 400
+    if n < 0:
+        return jsonify({"success": False, "error": "invalid byte count"}), 400
+    terminal.ack(n)
+    return jsonify({"success": True})
 
 
 # ============================================================

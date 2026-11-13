@@ -879,8 +879,31 @@ document.addEventListener('DOMContentLoaded', async () => {
         TerminalManager.disconnectAll();
     });
 
+    // 页面在线心跳：后端据此判断"已经有页面开着"，重启时就不再多开一个标签页
+    // （每多一个标签页就多一个浏览器 renderer 进程，几十 MB 起步）
+    // 连续两次心跳失败 = 后台已经重启过，这个页面和它失联了，自己 reload 接上
+    let _pingFail = 0, _pingReloaded = false;
+    const _pingUi = () => {
+        fetch('/api/ui/ping', { method: 'POST' })
+            .then((r) => {
+                if (r.ok) _pingFail = 0;
+                else _pingFail += 1;
+            })
+            .catch(() => { _pingFail += 1; })
+            .then(() => {
+                if (_pingFail >= 2 && !_pingReloaded) {
+                    _pingReloaded = true;
+                    location.reload();
+                }
+            });
+    };
+    _pingUi();
+    setInterval(_pingUi, 20000);
+
     // Auto-refresh sessions list every 30 seconds
+    // 标签页在后台时不做无意义的刷新（看不见还占着主线程和内存）
     setInterval(() => {
+        if (document.hidden) return;
         SessionManager.load();
     }, 30000);
 

@@ -16,6 +16,12 @@ class TerminalSession:
     MAX_OUTPUT_BUFFER = 8 * 1024 * 1024
     READ_CHUNK = 128 * 1024
 
+    # 浏览器确认消费的流量窗口：SSE 是单向推送、协议本身没有流控，
+    # 如果后端按网络速度猛推、浏览器主线程又在渲染/GC，事件会堆在浏览器里
+    # 无限增长（这也会把标签页撑死）。所以后端只允许"已发出 - 已确认"不超过
+    # 这个窗口，浏览器每消费掉一块就 POST /api/ssh/ack 回来。
+    SSE_ACK_WINDOW = 2 * 1024 * 1024
+
     def __init__(self, conn_id: str, ssh_client: PySSHClient):
         self.conn_id = conn_id
         self.ssh_client = ssh_client
@@ -24,10 +30,42 @@ class TerminalSession:
         self._out_lock = threading.Lock()
         self._out_ready = threading.Condition(self._out_lock)
         self.dropped_bytes = 0      # 因为消费端跟不上而丢掉的字节数
+        self._flow_lock = threading.Lock()
+        self._flow_ready = threading.Condition(self._flow_lock)
+        self.sent_bytes = 0         # SSE 已下发的字节
+        self.acked_bytes = 0        # 浏览器已确认消费的字节
         self._reader_thread = None
         self._running = False
         self.closed = False  # True once the SSH channel has ended
         self._lock = threading.Lock()
+
+    # ---- 端到端流控（浏览器确认制）----
+    def note_sent(self, n: int):
+        """记录已经通过 SSE 下发的字节数"""
+        with self._flow_ready:
+            self.sent_bytes += int(n)
+
+    def ack(self, n: int):
+        """浏览器确认已消费 n 字节（写入 xterm 完成或已丢弃都算消费掉）"""
+        with self._flow_ready:
+            self.acked_bytes += max(0, int(n))
+            self._flow_ready.notify_all()
+
+    def wait_credit(self, timeout: float = 0.5) -> bool:
+        """等到未确认字节回落到窗口内；超时返回 False（调用方自行决定降级）"""
+        import time
+        deadline = time.time() + timeout
+        with self._flow_ready:
+            while self.sent_bytes - self.acked_bytes > self.SSE_ACK_WINDOW:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return False
+                self._flow_ready.wait(remaining)
+            return True
+
+    def outstanding(self) -> int:
+        with self._flow_lock:
+            return self.sent_bytes - self.acked_bytes
 
     def open(self, rows: int = 40, cols: int = 120):
         """Open a terminal channel."""

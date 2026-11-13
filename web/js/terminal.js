@@ -355,6 +355,8 @@ const TerminalManager = {
     OUTPUT_HIGH_WATER: 4 * 1024 * 1024,   // 待解析字节上限
     OUTPUT_CHUNK: 256 * 1024,             // 单块最大字节
     OUTPUT_DROP_NOTICE: 1024 * 1024,      // 累计丢到 1MB 才提示一次，免得刷屏
+    OUTPUT_ACK_STEP: 512 * 1024,          // 每消费 512KB 向后端归还一次流量额度
+    OUTPUT_ACK_MAX_WAIT: 500,             // 小流量时最多攒 500ms 也要确认，免得后端干等
 
     _humanBytes(n) {
         if (n < 1024) return n + ' B';
@@ -364,11 +366,43 @@ const TerminalManager = {
     },
 
     _outReset(inst) {
+        if (inst && inst.outAckPending) this._flushAck(inst);   // 别把额度欠着不说
         inst.outQueue = [];
         inst.outBytes = 0;
         inst.outWriting = false;
         inst.outDropped = 0;
         inst.outDroppedPrinted = 0;
+        inst.outAckPending = 0;
+        inst.outAckLast = 0;
+    },
+
+    /**
+     * 把"已消费"的消息上报给后端，归还流量额度。
+     * 写入完成或丢弃都算消费掉（否则被丢掉的那部分额度永远还不回去，后端会一直卡住）。
+     */
+    _ackOutput(inst, n) {
+        if (!n || !inst) return;
+        inst.outAckPending = (inst.outAckPending || 0) + n;
+        const now = Date.now();
+        if (inst.outAckPending >= this.OUTPUT_ACK_STEP
+            || now - (inst.outAckLast || 0) >= this.OUTPUT_ACK_MAX_WAIT) {
+            this._flushAck(inst);
+        }
+    },
+
+    _flushAck(inst) {
+        const n = inst.outAckPending;
+        if (!n || !inst.connId || typeof fetch !== 'function') return;
+        inst.outAckPending = 0;
+        inst.outAckLast = Date.now();
+        // keepalive 让页面卸载时也能把额度还回去；失败也无所谓——后端 5 秒等不到
+        // 确认会自动降级成不限流，不会把终端冻死
+        fetch(`/api/ssh/ack/${inst.connId}`, {
+            method: 'POST',
+            body: String(n),
+            headers: { 'Content-Type': 'text/plain' },
+            keepalive: true,
+        }).catch(() => {});
     },
 
     /** SSE 每来一条消息都走这里：切块入队、限水位、触发泵送 */
@@ -386,6 +420,8 @@ const TerminalManager = {
             const dropped = inst.outQueue.shift();
             inst.outBytes -= dropped.length;
             inst.outDropped += dropped.length;
+            // 丢掉的数据也算"消费掉了"，必须回执，否则后端会一直等这批额度
+            this._ackOutput(inst, dropped.length);
         }
         this._pumpOutput(inst);
     },
@@ -395,6 +431,7 @@ const TerminalManager = {
         if (inst.outWriting) return;
         const chunk = inst.outQueue.shift();
         if (!chunk) {
+            this._flushAck(inst);
             this._flushDropNotice(inst);
             return;
         }
@@ -403,6 +440,7 @@ const TerminalManager = {
         this._flushDropNotice(inst);
         inst.term.write(chunk, () => {
             inst.outWriting = false;
+            this._ackOutput(inst, chunk.length);   // 这一块解析完了，归还额度
             this._pumpOutput(inst);
         });
     },

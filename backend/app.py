@@ -13,6 +13,7 @@ from flask_cors import CORS
 from config import Config
 from models import db
 from api import api_bp
+import ui_presence
 
 logging.basicConfig(
     level=logging.INFO,
@@ -263,7 +264,12 @@ def ensure_single_instance():
         logger.info(f"检测到已在运行的实例 ({url})，打开浏览器后退出")
         if os.environ.get("PYSHELL_NO_BROWSER") != "1":
             try:
-                webbrowser.open(url)
+                if ui_presence.seen_recently():
+                    # 已经有页面在轮询：再开一次只会多一个标签页（多一个 renderer 进程），
+                    # 而标签页越堆越多的代价就是"开个 pyshell 就十几个浏览器进程"
+                    logger.info("检测到已有 PyShell 页面开着，跳过打开浏览器（避免重复标签页）")
+                else:
+                    webbrowser.open(url)
             except Exception as e:
                 logger.warning(f"打开浏览器失败: {e}")
         return True  # 告诉调用方退出
@@ -358,7 +364,10 @@ def main():
         _close_splash()
         if os.environ.get("PYSHELL_NO_BROWSER") != "1":
             try:
-                webbrowser.open(url)
+                if ui_presence.seen_recently():
+                    logger.info("检测到已有 PyShell 页面开着，跳过打开浏览器（避免重复标签页）")
+                else:
+                    webbrowser.open(url)
             except Exception as e:
                 logger.warning(f"打开浏览器失败: {e}")
         return
@@ -387,8 +396,11 @@ def main():
         time.sleep(1.5)
         url = f"http://{host}:{port}"
         try:
-            webbrowser.open(url)
-            logger.info(f"浏览器已打开: {url}")
+            if ui_presence.seen_recently():
+                logger.info("检测到已有 PyShell 页面开着，跳过打开浏览器（避免重复标签页）")
+            else:
+                webbrowser.open(url)
+                logger.info(f"浏览器已打开: {url}")
         except Exception as e:
             logger.warning(f"打开浏览器失败: {e}")
         _close_splash()
