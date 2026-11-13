@@ -641,24 +641,57 @@ body.resizing #main-content {
     display: flex;
 }
 
-#editor-textarea {
+/* 编辑区外框：行号槽 + 文本域，共用一个边框 */
+.editor-code {
     flex: 1;
-    resize: none;
+    min-width: 0;
+    display: flex;
     background: #141414;
-    color: #d4d4d4;
     border: 1px solid var(--border);
     border-radius: 4px;
+    overflow: hidden;
+}
+
+.editor-code:focus-within {
+    border-color: var(--accent);
+}
+
+/* 行号槽：与文本域同字号、同整数行高，滚动由 JS 同步 scrollTop */
+.editor-gutter {
+    flex: 0 0 auto;
+    padding: 10px 8px 10px 10px;
+    min-width: 3ch;
+    text-align: right;
+    color: #6b7280;
+    background: #101010;
+    border-right: 1px solid #262626;
+    font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+    font-size: 13px;
+    line-height: 20px;
+    white-space: pre;
+    overflow: hidden;
+    user-select: none;
+}
+
+#editor-textarea {
+    flex: 1;
+    min-width: 0;
+    resize: none;
+    background: transparent;
+    color: #d4d4d4;
+    border: none;
+    border-radius: 0;
     padding: 10px;
     font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
     font-size: 13px;
-    line-height: 1.55;
+    line-height: 20px;
     tab-size: 4;
+    white-space: pre;
     overflow: auto;
 }
 
 #editor-textarea:focus {
     outline: none;
-    border-color: var(--accent);
 }
 
 .editor-footer #editor-status {

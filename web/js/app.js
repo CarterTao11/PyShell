@@ -192,7 +192,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             const end = editorTa.selectionEnd;
             editorTa.value = editorTa.value.slice(0, start) + '\t' + editorTa.value.slice(end);
             editorTa.selectionStart = editorTa.selectionEnd = start + 1;
-            SFTPManager._editorDirty = true;
+            // 直接改 value 不会触发 input 事件，手动派发一次让行号槽与脏标记跟上
+            editorTa.dispatchEvent(new Event('input'));
         }
     });
 

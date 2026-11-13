@@ -590,6 +590,65 @@ const SFTPManager = {
     // ---- 在线文本编辑 ----
     _editingPath: null,
     _editorDirty: false,
+    _editorSizeText: '',
+    _editorGutterLines: 0,
+
+    /** 绑定行号槽：滚动同步 + 内容变化重建行号 + 光标位置更新状态栏（只绑一次） */
+    _bindEditorGutter() {
+        if (this._editorGutterBound) return;
+        const ta = document.getElementById('editor-textarea');
+        const gutter = document.getElementById('editor-gutter');
+        if (!ta || !gutter) return;
+        this._editorGutterBound = true;
+
+        ta.addEventListener('scroll', () => { gutter.scrollTop = ta.scrollTop; });
+        ta.addEventListener('input', () => {
+            this._editorRenderGutter();
+            this._editorUpdateStatus();
+        });
+        ['click', 'keyup', 'select'].forEach(ev => {
+            ta.addEventListener(ev, () => this._editorUpdateStatus());
+        });
+    },
+
+    /**
+     * 重建行号槽。行数不变时只同步滚动位置，避免每敲一个字都重建整块文本。
+     * @param {boolean} [force] 打开新文件时强制重建
+     */
+    _editorRenderGutter(force) {
+        const ta = document.getElementById('editor-textarea');
+        const gutter = document.getElementById('editor-gutter');
+        if (!ta || !gutter) return;
+        const count = String(ta.value).split('\n').length;
+        if (!force && count === this._editorGutterLines) {
+            gutter.scrollTop = ta.scrollTop;
+            return;
+        }
+        this._editorGutterLines = count;
+        const numbers = [];
+        for (let i = 1; i <= count; i++) numbers.push(i);
+        // 末尾不留换行，否则 white-space:pre 会多渲染一行空行
+        gutter.textContent = numbers.join('\n');
+        // 位数变化时槽宽自动加宽，默认留出两位（"1" 与 "100" 不跳动）
+        gutter.style.minWidth = (String(count).length + 1) + 'ch';
+        gutter.scrollTop = ta.scrollTop;
+    },
+
+    /** 状态栏：第几行 / 共几行 + 文件大小 + 编码 */
+    _editorUpdateStatus(prefix) {
+        const ta = document.getElementById('editor-textarea');
+        const status = document.getElementById('editor-status');
+        if (!ta || !status) return;
+        const value = String(ta.value);
+        const total = value.split('\n').length;
+        const pos = value.slice(0, ta.selectionStart || 0).split('\n').length;
+        const parts = [];
+        if (prefix) parts.push(prefix);
+        parts.push(`第 ${pos} 行 / 共 ${total} 行`);
+        if (this._editorSizeText) parts.push(this._editorSizeText);
+        parts.push('UTF-8');
+        status.textContent = parts.join(' · ');
+    },
 
     async editFile(path) {
         if (!this.currentConnId) {
@@ -619,9 +678,12 @@ const SFTPManager = {
             }
             this._editingPath = path;
             this._editorDirty = false;
+            this._editorSizeText = this._formatSize(result.size);
             ta.value = result.content;
-            status.textContent =
-                `${this._formatSize(result.size)} · UTF-8 · 保存时直接覆盖原文件`;
+            ta.scrollTop = 0;
+            this._bindEditorGutter();
+            this._editorRenderGutter(true);   // 行号：打开即按实际行数铺满
+            this._editorUpdateStatus();
         } catch (err) {
             overlay.classList.add('hidden');
             showToast('读取文件错误: ' + err.message, 'error');
@@ -646,7 +708,7 @@ const SFTPManager = {
                 return;
             }
             this._editorDirty = false;
-            status.textContent = `已保存 ${new Date().toLocaleTimeString()}（覆盖原文件）`;
+            this._editorUpdateStatus('已保存 ' + new Date().toLocaleTimeString());
             showToast('文件已保存', 'success');
             // 刷新列表以更新修改时间
             if (this.currentConnId) this.browse(this.currentConnId, this.currentPath, { syncTerminal: false });

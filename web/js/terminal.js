@@ -314,6 +314,34 @@ const TerminalManager = {
     },
 
     /**
+     * 从终端屏幕回读光标所在行，去掉提示符，得到 shell 里真实的命令行。
+     * 只在本地缓冲不可信（Tab 补全 / 上下历史）时使用：
+     *   user@host:/usr# cd /usr/local/   ->  "cd /usr/local/"
+     * 拿不到（折行、提示符识别不出）时返回 null，调用方保持旧目录而不跳错。
+     */
+    _screenCommandLine(inst) {
+        try {
+            const buf = inst && inst.term && inst.term.buffer && inst.term.buffer.active;
+            if (!buf || typeof buf.getLine !== 'function') return null;
+            const row = (buf.baseY || 0) + (buf.cursorY || 0);
+            const line = buf.getLine(row);
+            if (!line) return null;
+            const text = String((line.translateToString && line.translateToString(true)) || '');
+            if (!text) return null;
+
+            // 常见提示符以 $ / # / % / > / ❯ / → 结尾，取最后一个之后的内容
+            const marks = /(\$|#|%|>|❯|→)\s+/g;
+            let start = 0;
+            let m;
+            while ((m = marks.exec(text)) !== null) start = m.index + m[0].length;
+            const cmd = text.slice(start).trim();
+            return cmd || null;
+        } catch (e) {
+            return null;
+        }
+    },
+
+    /**
      * 输入流解析：像行编辑器一样维护"当前行 + 光标"，行结束时解析 cd。
      * 旧实现只认单字符和单独的 \r：粘贴整行、方向键改动、Tab 补全、
      * 历史命令都会让跟踪目录失真，进而把 SFTP 带到错误目录。
@@ -389,8 +417,15 @@ const TerminalManager = {
                 inst._inputBuffer = '';
                 inst._inputCursor = 0;
                 inst._inputUnreliable = false;
-                // 被 Tab 补全 / 历史命令改写过的行，内容已知是错的，宁可不更新
-                if (!unreliable) this._onLineSubmitted(connId, line);
+                if (!unreliable) {
+                    this._onLineSubmitted(connId, line);
+                } else {
+                    // 被 Tab 补全 / 历史命令改写过：本地缓冲已失真（用户敲
+                    // `cd /usr/lo<Tab>` 时远端其实是 `cd /usr/local/`），
+                    // 从终端屏幕回读这一行才是真命令。
+                    const screen = this._screenCommandLine(inst);
+                    if (screen) this._onLineSubmitted(connId, screen);
+                }
             } else if (tok === '\x7f' || tok === '\b') {
                 delBefore(1);                                  // Backspace
             } else if (tok === '\t') {
@@ -437,9 +472,11 @@ const TerminalManager = {
             if (resolved === null) return;
             finalCwd = resolved;
         }
-        if (finalCwd === null || finalCwd === cwdBefore) return;
+        if (finalCwd === null) return;
 
-        this.prevCwdMap.set(connId, cwdBefore);
+        // 即使解析出的目录与跟踪值相同也通知一次：面板可能因为上一次列目录
+        // 失败停在旧目录上，这次让它自己纠正回来（同目录时面板会直接跳过）
+        if (finalCwd !== cwdBefore) this.prevCwdMap.set(connId, cwdBefore);
         this.cwdMap.set(connId, finalCwd);
         this._onTerminalDirChange(connId, finalCwd);
     },

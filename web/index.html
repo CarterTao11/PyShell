@@ -353,7 +353,10 @@
                 <button class="dialog-close" id="btn-editor-close" title="关闭">&times;</button>
             </div>
             <div class="dialog-body editor-body">
-                <textarea id="editor-textarea" spellcheck="false" wrap="off"></textarea>
+                <div class="editor-code">
+                    <div id="editor-gutter" class="editor-gutter" aria-hidden="true">1</div>
+                    <textarea id="editor-textarea" spellcheck="false" wrap="off"></textarea>
+                </div>
             </div>
             <div class="dialog-footer editor-footer">
                 <span id="editor-status"></span>
