@@ -273,3 +273,4 @@ CLAUDE.md
 *.db
 ./tests/*
 tests
+test.*
