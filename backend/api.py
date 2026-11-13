@@ -187,6 +187,24 @@ def ssh_input(conn_id):
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@api_bp.route("/api/ssh/homedir/<conn_id>", methods=["GET"])
+def ssh_homedir(conn_id):
+    """Get the user's home directory via SFTP normalize.
+    SFTP normalize('.') returns the SFTP server's CWD which is
+    always the user's home directory. This is more reliable than
+    exec_command on a connection with an active PTY shell."""
+    try:
+        client = conn_mgr.get_connection(conn_id)
+        sftp = client.get_sftp_client()
+        home = sftp.normalize('.')
+        if not home or not home.startswith('/'):
+            home = '/'
+        return jsonify({"success": True, "home": home})
+    except Exception as e:
+        logger.error(f"SSH homedir failed: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @api_bp.route("/api/ssh/resize", methods=["POST"])
 def ssh_resize():
     data = request.get_json(force=True)

@@ -26,6 +26,10 @@ function showToast(message, type = 'info', duration) {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+    // 版本标记：排查"改了代码但界面没变"（浏览器缓存旧 JS）时看这一行
+    console.info('%c[PyShell] 前端 2026-11-13 版本 · 终端↔SFTP 目录联动已启用',
+        'color:#00d4aa;font-weight:bold');
+
     // Load sessions
     await SessionManager.load();
 
@@ -106,32 +110,35 @@ document.addEventListener('DOMContentLoaded', async () => {
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             document.getElementById('tab-content-' + tab).classList.add('active');
 
-            // If switching to SFTP and there's an active connection, load SFTP
-            if (tab === 'sftp' && TerminalManager.activeConnId) {
-                // Remember the last directory per connection
-                const sameConn = SFTPManager.currentConnId === TerminalManager.activeConnId;
-                const path = (sameConn && SFTPManager.currentPath) ? SFTPManager.currentPath : '/';
-                SFTPManager.browse(TerminalManager.activeConnId, path);
+            // 切到 SFTP：默认进入当前激活终端的工作目录（不向终端注入 cd）
+            if (tab === 'sftp') {
+                SFTPManager.openForTerminal(TerminalManager.activeConnId);
             }
         });
     });
 
     // ===== SFTP toolbar =====
+    // 面板可能还停留在另一个连接上（此时 activeConnId 已经不是它），
+    // 所以统一优先用 SFTPManager 自己记录的连接
+    const sftpConnId = () => SFTPManager.currentConnId || TerminalManager.activeConnId;
+
     document.getElementById('btn-sftp-upload').addEventListener('click', () => {
-        SFTPManager.upload(TerminalManager.activeConnId);
+        SFTPManager.upload(sftpConnId());
     });
 
     document.getElementById('btn-sftp-upload-folder').addEventListener('click', () => {
-        SFTPManager.uploadFolder(TerminalManager.activeConnId);
+        SFTPManager.uploadFolder(sftpConnId());
     });
 
     document.getElementById('btn-sftp-mkdir').addEventListener('click', () => {
-        SFTPManager.mkdir(TerminalManager.activeConnId);
+        SFTPManager.mkdir(sftpConnId());
     });
 
     document.getElementById('btn-sftp-refresh').addEventListener('click', () => {
-        if (TerminalManager.activeConnId) {
-            SFTPManager.browse(TerminalManager.activeConnId, SFTPManager.currentPath || '/');
+        const connId = sftpConnId();
+        // 刷新只是重新列目录，不能让终端跟着 cd
+        if (connId) {
+            SFTPManager.browse(connId, SFTPManager.currentPath || '/', { syncTerminal: false });
         }
     });
 
@@ -579,17 +586,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             showToast('没有活动的终端连接', 'warning');
             return;
         }
-        // 发送命令到终端（通过 API）
+        // 发送命令到终端（走 TerminalManager._sendInput，收藏里的 cd 也会
+        // 被目录跟踪识别，SFTP 面板随之更新）
         const command = favorite.command + '\n';
-        try {
-            await fetch(`/api/ssh/input/${TerminalManager.activeConnId}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'text/plain' },
-                body: command,
-            });
-        } catch (err) {
-            console.error('发送命令失败:', err);
-        }
+        TerminalManager._sendInput(TerminalManager.activeConnId, command);
         // 增加使用次数
         await fetch(`/api/command-favorites/${favorite.id}/use`, { method: 'POST' });
     }

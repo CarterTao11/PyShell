@@ -15,6 +15,15 @@ const TerminalManager = {
     splitPanes: [],            // [connId|null, ...] 当前占用窗格的终端 (2或4个)
     _prevActive: null,
     _winResizeBound: false,
+    // 目录同步: conn_id -> 当前工作目录
+    cwdMap: new Map(),
+    // home 目录: conn_id -> ~ 展开结果（cd / cd ~ / 打开 SFTP 都要用）
+    homeMap: new Map(),
+    // 上一次目录: conn_id -> OLDPWD（支持 cd -）
+    prevCwdMap: new Map(),
+    // 目录同步防抖: cd 防抖: 快速连续 cd 时只触发最后一次
+    _cdDebounceTimer: null,
+    _cdPending: null,  // { connId, path }
 
     async connect(sessionId, config) {
         const connId = 'conn_' + (this.nextConnId++);
@@ -60,6 +69,9 @@ const TerminalManager = {
 
         // Create terminal UI and start streaming output
         try {
+            // 先取到 home 目录：终端一旦可输入，cd ~ / 打开 SFTP 就必须能定位，
+            // 放在创建终端之后会有一段"目录未知"的窗口期
+            await this._initHomeDir(actualConnId);
             this._createTerminal(actualConnId, sessionId, config);
             this.connectedSessions.add(sessionId);
             this._startSSE(actualConnId);
@@ -292,11 +304,144 @@ const TerminalManager = {
     },
 
     _sendInput(connId, data) {
+        // 先本地解析输入流以跟踪 cwd（粘贴整行、多字符输入也能识别），再发往远端
+        this._feedInput(connId, data);
         fetch(`/api/ssh/input/${connId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain' },
             body: data,
         }).catch(err => console.error('Send input error:', err));
+    },
+
+    /**
+     * 输入流解析：像行编辑器一样维护"当前行 + 光标"，行结束时解析 cd。
+     * 旧实现只认单字符和单独的 \r：粘贴整行、方向键改动、Tab 补全、
+     * 历史命令都会让跟踪目录失真，进而把 SFTP 带到错误目录。
+     */
+    _feedInput(connId, data) {
+        const inst = this.instances.get(connId);
+        if (!inst || typeof data !== 'string' || !data) return;
+        if (inst._inputBuffer === undefined) inst._inputBuffer = '';
+        if (inst._inputCursor === undefined || inst._inputCursor > inst._inputBuffer.length) {
+            inst._inputCursor = inst._inputBuffer.length;
+        }
+        const buf = () => inst._inputBuffer;
+        const len = () => inst._inputBuffer.length;
+
+        const insert = (s) => {
+            inst._inputBuffer = buf().slice(0, inst._inputCursor) + s + buf().slice(inst._inputCursor);
+            inst._inputCursor += s.length;
+        };
+        const delBefore = (n) => {
+            const from = Math.max(0, inst._inputCursor - n);
+            inst._inputBuffer = buf().slice(0, from) + buf().slice(inst._inputCursor);
+            inst._inputCursor = from;
+        };
+
+        // 转义序列整体作为一个 token，普通字符一个 token
+        const tokens = data.match(
+            /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1bO[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\s\S]/g
+        ) || [];
+
+        for (const tok of tokens) {
+            // ---- CSI 序列（方向键 / Home / End / Delete / 历史 / 括号粘贴）
+            if (tok.length > 1 && tok.charCodeAt(0) === 0x1b) {
+                const csi = tok.match(/^\x1b\[([0-9;?]*)[ -\/]*([@-~])$/);
+                const ss3 = tok.match(/^\x1bO([A-Za-z])$/);
+                if (csi) {
+                    const num = parseInt(csi[1], 10) || 1;
+                    const fin = csi[2];
+                    if (fin === 'D') inst._inputCursor = Math.max(0, inst._inputCursor - num);
+                    else if (fin === 'C') inst._inputCursor = Math.min(len(), inst._inputCursor + num);
+                    else if (fin === 'H') inst._inputCursor = 0;          // Home
+                    else if (fin === 'F') inst._inputCursor = len();      // End
+                    else if (fin === '~') {
+                        if (csi[1] === '3') {                            // Delete
+                            inst._inputBuffer = buf().slice(0, inst._inputCursor) + buf().slice(inst._inputCursor + 1);
+                        } else if (csi[1] === '1' || csi[1] === '7') {
+                            inst._inputCursor = 0;
+                        } else if (csi[1] === '4' || csi[1] === '8') {
+                            inst._inputCursor = len();
+                        }
+                        // 200~/201~ 是括号粘贴的起止标记，忽略即可
+                    } else if (fin === 'A' || fin === 'B') {
+                        // 上/下历史：shell 会改写整行，本地缓冲不再可信
+                        inst._inputUnreliable = true;
+                    }
+                    continue;
+                }
+                if (ss3) {
+                    const k = ss3[1];
+                    if (k === 'D') inst._inputCursor = Math.max(0, inst._inputCursor - 1);
+                    else if (k === 'C') inst._inputCursor = Math.min(len(), inst._inputCursor + 1);
+                    else if (k === 'H') inst._inputCursor = 0;
+                    else if (k === 'F') inst._inputCursor = len();
+                    else if (k === 'A' || k === 'B') inst._inputUnreliable = true;
+                    continue;
+                }
+                continue;   // 其它控制序列（OSC / 字符集切换等）不影响命令行
+            }
+
+            // ---- 普通字符 / 控制键
+            if (tok === '\r' || tok === '\n') {
+                const line = inst._inputBuffer;
+                const unreliable = inst._inputUnreliable === true;
+                inst._inputBuffer = '';
+                inst._inputCursor = 0;
+                inst._inputUnreliable = false;
+                // 被 Tab 补全 / 历史命令改写过的行，内容已知是错的，宁可不更新
+                if (!unreliable) this._onLineSubmitted(connId, line);
+            } else if (tok === '\x7f' || tok === '\b') {
+                delBefore(1);                                  // Backspace
+            } else if (tok === '\t') {
+                inst._inputUnreliable = true;                  // Tab 补全会改写该 token
+            } else if (tok === '\x15') {
+                inst._inputBuffer = ''; inst._inputCursor = 0; // Ctrl+U
+            } else if (tok === '\x0b') {
+                inst._inputBuffer = buf().slice(0, inst._inputCursor);  // Ctrl+K
+            } else if (tok === '\x17') {
+                // Ctrl+W：删掉光标前一个词（bash 以空白为词边界）
+                const before = buf().slice(0, inst._inputCursor);
+                const cut = before.replace(/[^\s]+$/, '');
+                delBefore(before.length - cut.length);
+            } else if (tok === '\x01') {
+                inst._inputCursor = 0;                         // Ctrl+A
+            } else if (tok === '\x05') {
+                inst._inputCursor = len();                     // Ctrl+E
+            } else if (tok === '\x03') {
+                inst._inputBuffer = ''; inst._inputCursor = 0; // Ctrl+C
+            } else if (tok.charCodeAt(0) >= 32) {
+                insert(tok);                                   // 可打印字符
+            }
+        }
+    },
+
+    /**
+     * 一行命令提交后解析 cd 命令，成功则更新跟踪目录并通知 SFTP 跟随
+     */
+    _onLineSubmitted(connId, line) {
+        const text = (line || '').trim();
+        if (!text || text.startsWith('#')) return;
+
+        const cwdBefore = this.cwdMap.get(connId) || '/';
+        const home = this.homeMap.get(connId) || cwdBefore;
+        const prev = this.prevCwdMap.get(connId) || null;
+
+        // 按命令分隔符切分：`cd /a && ls`、`ls; cd /b`、`cd /c | less` 都能识别
+        let finalCwd = null;   // null = 整行没有可解析的 cd
+        for (const seg of text.split(/(?:&&|\|\||;|&|\|)/)) {
+            const arg = this._parseCdCommand(seg);
+            if (arg === null) continue;
+            const resolved = this._resolvePath(arg, finalCwd || cwdBefore, home, prev);
+            // 解析不出来（cd $VAR、无历史的 cd - 等）不猜，保持原目录
+            if (resolved === null) return;
+            finalCwd = resolved;
+        }
+        if (finalCwd === null || finalCwd === cwdBefore) return;
+
+        this.prevCwdMap.set(connId, cwdBefore);
+        this.cwdMap.set(connId, finalCwd);
+        this._onTerminalDirChange(connId, finalCwd);
     },
 
     /** 写剪贴板：优先 Clipboard API，被拒（如失去用户激活）时退回 execCommand */
@@ -333,6 +478,8 @@ const TerminalManager = {
         let ok = 0;
         for (const connId of targets) {
             try {
+                // 全局命令里的 cd 也要被目录跟踪识别（SFTP 跟随）
+                this._feedInput(connId, text);
                 const res = await fetch(`/api/ssh/input/${connId}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'text/plain' },
@@ -345,6 +492,154 @@ const TerminalManager = {
             }
         }
         return { ok, total: targets.length };
+    },
+
+    // ===== 目录同步（终端 ↔ SFTP）=====
+
+    /**
+     * 获取连接的当前跟踪目录，若未知则尝试从后端获取 home 目录
+     */
+    async getTrackedCwd(connId) {
+        // 已有有效跟踪目录时直接返回，不发起网络请求
+        const existing = this.cwdMap.get(connId);
+        if (existing && existing.startsWith('/')) return existing;
+        // 未知时先取 home（连接时已取过，这里只是兜底）
+        if (!this.homeMap.has(connId)) await this._initHomeDir(connId);
+        return this.cwdMap.get(connId) || this.homeMap.get(connId) || '/';
+    },
+
+    /** 取连接的 home 目录（连接时已缓存，通常不发请求） */
+    async getHomeDir(connId) {
+        if (!this.homeMap.has(connId)) await this._initHomeDir(connId);
+        return this.homeMap.get(connId) || this.cwdMap.get(connId) || '/';
+    },
+
+    /**
+     * 初始化连接的 home 目录（连接成功后调用）
+     * 记录 homeMap（供 ~ 展开用），仅在 cwdMap 尚无有效值时初始化 cwdMap
+     */
+    async _initHomeDir(connId) {
+        const tracked = this.cwdMap.get(connId);
+        if (this.homeMap.has(connId) && tracked && tracked.startsWith('/')) {
+            return this.homeMap.get(connId);
+        }
+        try {
+            const res = await fetch(`/api/ssh/homedir/${connId}`);
+            const result = await res.json();
+            if (result.success && result.home && result.home.startsWith('/')) {
+                const home = this._normalizePath(result.home);
+                this.homeMap.set(connId, home);
+                const current = this.cwdMap.get(connId);
+                if (!current || !current.startsWith('/')) this.cwdMap.set(connId, home);
+                return home;
+            }
+        } catch (e) {
+            console.warn('_initHomeDir error:', e);
+        }
+        // 失败时仅在没有其他值时存储根目录
+        if (!this.cwdMap.has(connId)) this.cwdMap.set(connId, '/');
+        if (!this.homeMap.has(connId)) this.homeMap.set(connId, this.cwdMap.get(connId) || '/');
+        return this.homeMap.get(connId);
+    },
+
+    /**
+     * 规范化路径：去多余斜杠、去尾部斜杠
+     */
+    _normalizePath(p) {
+        if (!p) return '/';
+        let s = String(p).replace(/\/\/+/g, '/');
+        if (s.length > 1) s = s.replace(/\/+$/, '');
+        return s || '/';
+    },
+
+    /**
+     * 解析路径（支持 ~, 相对路径, 绝对路径, cd -）。
+     * 返回 null 表示"本地无法得知结果"（变量展开、通配符、~user 等），
+     * 调用方应放弃更新跟踪目录，而不是猜一个错误路径。
+     */
+    _resolvePath(path, cwd, home, prev) {
+        const arg = (path || '').trim();
+        if (!arg || arg === '~') return this._normalizePath(home || '/');
+        if (arg === '-') return prev ? this._normalizePath(prev) : null;  // cd - => OLDPWD
+        if (arg.startsWith('~/')) return this._normalizePath((home || '/') + arg.slice(1));
+        if (arg.startsWith('~')) return null;  // ~user：无法确定
+        if (/^[`$]/.test(arg) || /\$\(|\$\{|\*|\?|`/.test(arg)) return null;
+        if (arg.startsWith('/')) return this._normalizePath(arg);
+        // 相对路径：拼接到 cwd
+        const parts = (cwd || '/').split('/').filter(Boolean);
+        for (const seg of arg.split('/')) {
+            if (seg === '.' || seg === '') continue;
+            if (seg === '..') parts.pop();
+            else parts.push(seg);
+        }
+        return '/' + parts.join('/') || '/';
+    },
+
+    /**
+     * 解析输入行中的 cd 命令，返回新路径或 null
+     */
+    _parseCdCommand(line) {
+        // 去除前后空格
+        line = line.trim();
+        // 跳过空行和注释
+        if (!line || line.startsWith('#')) return null;
+        // 匹配 cd 命令，允许后续跟 && / || / ; / | 等链式操作符
+        // 关键：不用 $ 结尾，改为检测后面是否为命令分隔符或字符串末尾
+        const m = line.match(/^cd\s+(?:'([^']*)'|"([^"]*)"|([^\s;#&|]*))(?=[\s]*(?:&&|\|\||[;#|&]|$))/);
+        if (m) return m[1] || m[2] || m[3] || '';
+        // 单独 cd（无参数）：后面直接是分隔符或字符串末尾
+        if (/^cd(?=\s*(?:&&|\|\||[;#|&]|$))/.test(line)) return '';
+        return null;
+    },
+
+    /**
+     * 终端目录变化时触发：让正在使用这个连接的 SFTP 面板跟随。
+     * 注意：不看 SFTP 标签是否可见 —— 用户在会话标签里 cd、随后切到 SFTP
+     * 也必须看到最新目录；面板隐藏时列表在后台刷新即可。
+     * 带防抖：快速连续 cd 时只触发最后一次。
+     */
+    _onTerminalDirChange(connId, newPath) {
+        this.cwdMap.set(connId, newPath);
+
+        if (typeof SFTPManager === 'undefined') return;
+
+        // 记录最新目录变化，防抖后统一处理
+        this._cdPending = { connId, path: newPath };
+        if (this._cdDebounceTimer) clearTimeout(this._cdDebounceTimer);
+        this._cdDebounceTimer = setTimeout(() => {
+            this._cdDebounceTimer = null;
+            const pending = this._cdPending;
+            this._cdPending = null;
+            if (!pending) return;
+            // 只有 SFTP 当前就是这个连接时才跟随（浏览别的连接时不动）
+            SFTPManager.onTerminalCwd(pending.connId, pending.path);
+        }, 150);
+    },
+
+    /**
+     * SFTP 里切换了目录 -> 让终端跟随。
+     * 用 Ctrl+U 清掉未提交的输入行，避免用户输入的半截命令和 cd 粘在一起。
+     */
+    applyCwdFromSftp(connId, path) {
+        const inst = this.instances.get(connId);
+        const target = this._normalizePath(path || '/');
+        if (!inst) {
+            this.cwdMap.set(connId, target);
+            return;
+        }
+        if (this.cwdMap.get(connId) === target) return;  // 终端已在该目录，无需 cd
+        const hadPending = !!inst._inputBuffer;
+        inst._inputBuffer = '';
+        inst._inputCursor = 0;
+        inst._inputUnreliable = false;
+        if (hadPending) this._sendInput(connId, '\x15');   // Ctrl+U 清掉未提交的行
+        // 注入的 cd 会被 _feedInput 正常解析，cwdMap 由解析器统一更新
+        this._sendInput(connId, `cd ${this._quoteRemotePath(target)}\n`);
+    },
+
+    /** 远端路径转义：' -> '\'' */
+    _quoteRemotePath(p) {
+        return "'" + String(p).replace(/'/g, "'\\''") + "'";
     },
 
     _syncResize(connId) {
@@ -410,6 +705,14 @@ const TerminalManager = {
         // Refit after layout settles, then sync PTY size
         setTimeout(() => this.fitVisible(), 100);
         inst.term.focus();
+
+        // SFTP 面板正开着时切换终端标签：让它跟随到新终端的当前目录
+        if (typeof SFTPManager !== 'undefined' && SFTPManager.currentConnId !== connId) {
+            const sftpPanel = document.getElementById('tab-content-sftp');
+            if (sftpPanel && sftpPanel.classList.contains('active')) {
+                SFTPManager.openForTerminal(connId);
+            }
+        }
     },
 
     /**
@@ -563,6 +866,19 @@ const TerminalManager = {
 
         inst.term.dispose();
         this.instances.delete(connId);
+        this.cwdMap.delete(connId);
+        this.homeMap.delete(connId);
+        this.prevCwdMap.delete(connId);
+        // 通知 SFTP 面板：正在浏览的连接已经断开
+        if (typeof SFTPManager !== 'undefined') SFTPManager.onConnectionClosed(connId);
+        // 清理防抖状态
+        if (this._cdPending && this._cdPending.connId === connId) {
+            this._cdPending = null;
+            if (this._cdDebounceTimer) {
+                clearTimeout(this._cdDebounceTimer);
+                this._cdDebounceTimer = null;
+            }
+        }
 
         // Split-mode cleanup
         if (this.splitMode) {

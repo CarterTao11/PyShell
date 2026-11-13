@@ -60,12 +60,168 @@ const SFTPManager = {
         this.browse(this.currentConnId, p);
     },
 
-    async browse(connId, path) {
-        this.currentConnId = connId;
-        const target = this.normalizePath(path || '/');
+    /** 是否已经为某个连接打开过面板（打开过才做后台跟随） */
+    _opened: false,
+    _browsing: false,
+    _pendingBrowse: null,
 
-        document.querySelector('.sftp-empty').style.display = 'none';
-        document.getElementById('sftp-browser').style.display = 'flex';
+    _showBrowser() {
+        const empty = document.querySelector('.sftp-empty');
+        if (empty) empty.style.display = 'none';
+        const browser = document.getElementById('sftp-browser');
+        if (browser) browser.style.display = 'flex';
+    },
+
+    /** 收回空状态（无连接 / 连接已断开） */
+    _showEmpty(html) {
+        const empty = document.querySelector('.sftp-empty');
+        const browser = document.getElementById('sftp-browser');
+        if (empty) {
+            empty.innerHTML = html || '<p>请先通过 SSH 连接终端，</p><p>然后在此查看文件。</p>';
+            empty.style.display = 'block';
+        }
+        if (browser) browser.style.display = 'none';
+        this.currentConnId = null;
+        this.currentPath = '/';
+        this._opened = false;
+        this._pendingBrowse = null;
+        this._syncPathInput('/');
+    },
+
+    /** 列表区占位文字（切连接/加载中时清掉上一台机器的列表） */
+    _setListMessage(text) {
+        const container = document.getElementById('sftp-file-list');
+        if (container) {
+            container.innerHTML = `<div style="padding:20px;text-align:center;color:var(--text-secondary);">${
+                this._escapeHtml(text)}</div>`;
+        }
+    },
+
+    /**
+     * 打开 SFTP 面板并进入终端当前目录 —— "选择 SFTP 标签"的唯一入口。
+     * 路径来源是终端，所以这里绝不向终端注入 cd（否则每次切标签都会
+     * 在终端里多打一条 cd，还会打断正在输入的命令）。
+     */
+    async openForTerminal(connId) {
+        if (!connId) {
+            this._showEmpty();
+            return false;
+        }
+
+        if (this.currentConnId !== connId) {
+            // 切到另一台机器的连接：旧列表不能留在界面上
+            this.currentPath = '/';
+            this._setListMessage('加载中...');
+        }
+
+        const cwd = await TerminalManager.getTrackedCwd(connId);
+        let ok = await this.browse(connId, cwd, { syncTerminal: false, quiet: true });
+
+        if (!ok) {
+            // 跟踪目录可能已被删除或没有权限：退回 home 再试一次
+            const home = await TerminalManager.getHomeDir(connId);
+            if (this.normalizePath(home) !== this.normalizePath(cwd)) {
+                ok = await this.browse(connId, home, { syncTerminal: false, quiet: true });
+            }
+        }
+        if (!ok) {
+            this._setListMessage('无法读取该目录，请在上方输入框手动指定路径');
+            showToast('无法读取终端当前目录，请在上方输入框手动指定路径', 'warning');
+        }
+        return ok;
+    },
+
+    /**
+     * 终端 cd 后由 TerminalManager 调用：SFTP 跟随（面板隐藏时后台刷新，
+     * 用户切回 SFTP 标签看到的就是最新目录）。
+     *
+     * 跟随失败（目录不存在 / 无权限 / 主机限制）时不再静默：面板保留上一
+     * 有效目录，同时在状态栏说明原因 —— 否则用户看到的就是"SFTP 不动了"。
+     */
+    async onTerminalCwd(connId, path) {
+        if (!this._opened || this.currentConnId !== connId) return;
+        const target = this.normalizePath(path || '/');
+        if (target === this.currentPath) {
+            this._syncPathInput();
+            this._clearStatus();
+            return;
+        }
+        const ok = await this._enqueueBrowse(connId, target,
+            { syncTerminal: false, quiet: true });
+        if (ok === null) return;      // 已排队，结论由正在跑的那一趟处理
+        if (ok) {
+            this._clearStatus();
+            return;
+        }
+        // 面板已经切到别的连接 / 被收起时不再提示
+        if (this.currentConnId !== connId || !this._opened) return;
+        const msg = `终端已切到 ${target}，但 SFTP 无法列出该目录（已保留 ${this.currentPath}）`;
+        console.warn('[dir-sync]', msg);
+        this._setStatus(msg);
+    },
+
+    /** 状态栏（上传进度也用它；只覆盖自己写的内容） */
+    _setStatus(text) {
+        const status = document.getElementById('sftp-status');
+        if (status) status.textContent = text;
+        this._ownStatus = text;
+    },
+
+    _clearStatus() {
+        if (!this._ownStatus) return;
+        const status = document.getElementById('sftp-status');
+        if (status && status.textContent === this._ownStatus) status.textContent = '';
+        this._ownStatus = '';
+    },
+
+    /** 连接断开：正在浏览它就把面板收回空状态 */
+    onConnectionClosed(connId) {
+        if (this.currentConnId !== connId) return;
+        this._showEmpty('<p>当前终端已断开，</p><p>请重新连接后再查看文件。</p>');
+    },
+
+    /** 串行排队 browse，避免并发请求互相覆盖 currentPath */
+    _enqueueBrowse(connId, path, opts) {
+        this._pendingBrowse = { connId, path, opts };
+        // 不忙时直接跑一趟并把结果回给调用方；忙时排队，由正在跑的那一趟处理，
+        // 这里返回 null 表示"已排队，暂无结论"
+        if (!this._browsing) return this._flushPendingBrowse();
+        return Promise.resolve(null);
+    },
+
+    async _flushPendingBrowse() {
+        this._browsing = true;
+        let last = false;
+        try {
+            while (this._pendingBrowse) {
+                const job = this._pendingBrowse;
+                this._pendingBrowse = null;
+                last = await this.browse(job.connId, job.path, job.opts || {});
+            }
+        } catch (e) {
+            console.warn('_flushPendingBrowse error:', e);
+        } finally {
+            this._browsing = false;
+        }
+        return last;
+    },
+
+    /**
+     * 列目录。
+     * @param {object} [opts]
+     * @param {boolean} [opts.syncTerminal=true] 切换成功后是否让终端跟随 cd
+     * @param {boolean} [opts.quiet] 失败时不弹 toast
+     * @returns {Promise<boolean>} 是否成功
+     */
+    async browse(connId, path, opts = {}) {
+        const syncTerminal = opts.syncTerminal !== false;
+        this.currentConnId = connId;
+        this._opened = true;
+
+        let target = this.normalizePath(path || '/');
+        if (!target.startsWith('/')) target = '/';
+
+        this._showBrowser();
         this._syncPathInput(target);
 
         try {
@@ -73,19 +229,30 @@ const SFTPManager = {
             const result = await res.json();
 
             if (!result.success) {
-                showToast('SFTP 错误: ' + result.error, 'error');
-                // 目录切换失败：保持显示上一个有效目录
+                // 路径无效：保留上一次有效目录，既不改终端也不跳回根目录
+                // （旧实现在这里强制回 / 并把终端也 cd 到 /，非常危险）
+                console.warn('SFTP list failed:', target, result.error);
                 this._syncPathInput();
-                return;
+                if (!opts.quiet) showToast('SFTP 错误: ' + result.error, 'error');
+                return false;
             }
 
             // 只有成功才提交新路径，避免状态与列表不一致
             this.currentPath = target;
             this._renderFiles(result.items);
             this._syncPathInput();
+
+            // SFTP 里切换目录 -> 终端跟随（路径没变时 applyCwdFromSftp 自行跳过）
+            if (syncTerminal && typeof TerminalManager !== 'undefined'
+                    && TerminalManager.instances.has(connId)) {
+                TerminalManager.applyCwdFromSftp(connId, target);
+            }
+            return true;
         } catch (err) {
             console.error('SFTP browse error:', err);
             this._syncPathInput();
+            if (!opts.quiet) showToast('SFTP 错误: ' + err.message, 'error');
+            return false;
         }
     },
 
@@ -289,7 +456,7 @@ const SFTPManager = {
             showToast('上传错误: ' + err.message, 'error');
             if (status) status.textContent = '';
         } finally {
-            this.browse(connId, this.currentPath);
+            this.browse(connId, this.currentPath, { syncTerminal: false });
         }
     },
 
@@ -482,7 +649,7 @@ const SFTPManager = {
             status.textContent = `已保存 ${new Date().toLocaleTimeString()}（覆盖原文件）`;
             showToast('文件已保存', 'success');
             // 刷新列表以更新修改时间
-            if (this.currentConnId) this.browse(this.currentConnId, this.currentPath);
+            if (this.currentConnId) this.browse(this.currentConnId, this.currentPath, { syncTerminal: false });
         } catch (err) {
             status.textContent = '';
             showToast('保存错误: ' + err.message, 'error');
@@ -513,7 +680,7 @@ const SFTPManager = {
             }
             // Check if browse dir is the parent
             if (this.currentPath && fullPath.startsWith(this.currentPath)) {
-                this.browse(this.currentConnId, this.currentPath);
+                this.browse(this.currentConnId, this.currentPath, { syncTerminal: false });
             }
             showToast('文件已创建', 'success');
         } catch (e) {
@@ -537,7 +704,7 @@ const SFTPManager = {
                 return;
             }
             if (this.currentPath && fullPath.startsWith(this.currentPath)) {
-                this.browse(this.currentConnId, this.currentPath);
+                this.browse(this.currentConnId, this.currentPath, { syncTerminal: false });
             }
             showToast('文件夹已创建', 'success');
         } catch (e) {
@@ -560,7 +727,7 @@ const SFTPManager = {
             });
             const result = await res.json();
             if (result.success) {
-                this.browse(connId, this.currentPath);
+                this.browse(connId, this.currentPath, { syncTerminal: false });
                 showToast('目录已创建', 'success');
             } else {
                 showToast('创建目录失败: ' + result.error, 'error');
@@ -581,7 +748,7 @@ const SFTPManager = {
             });
             const result = await res.json();
             if (result.success) {
-                this.browse(this.currentConnId, this.currentPath);
+                this.browse(this.currentConnId, this.currentPath, { syncTerminal: false });
                 showToast(isDir ? '目录已删除' : '文件已删除', 'success');
             } else {
                 showToast('删除失败: ' + result.error, 'error');
