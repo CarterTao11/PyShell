@@ -130,6 +130,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         SFTPManager.uploadFolder(sftpConnId());
     });
 
+    document.getElementById('sftp-progress-cancel').addEventListener('click', () => {
+        SFTPManager.cancelUpload();
+    });
+
     document.getElementById('btn-sftp-mkdir').addEventListener('click', () => {
         SFTPManager.mkdir(sftpConnId());
     });

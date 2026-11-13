@@ -72,6 +72,7 @@ pyshell/
 │   ├── css/style.css
 │   ├── js/
 │   │   ├── app.js
+│   │   ├── dialog.js   # 统一弹框（不使用浏览器原生 alert/confirm/prompt）
 │   │   ├── terminal.js
 │   │   ├── session.js
 │   │   └── sftp.js
@@ -120,6 +121,7 @@ pyshell/
 
 ## 注意
 
+- 前端弹框一律用自绘的 `Dialog`（`web/js/dialog.js`），不使用浏览器原生 `alert` / `confirm` / `prompt`：原生弹框会阻塞主线程、样式无法定制、在部分环境里标题带站点名
 - 凭据加密在 Windows 下使用 DPAPI (用户级加密)，其他平台降级为 base64 编码
 - 数据库文件存储在 `data/pyshell.db`
 - 默认监听 `127.0.0.1`，仅本地访问

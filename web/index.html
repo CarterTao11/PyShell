@@ -46,6 +46,15 @@
                         <button id="btn-sftp-newfile" class="btn btn-sm" title="在当前目录新建空文件，已存在不会覆盖">+ 新建文件</button>
                         <button id="btn-sftp-refresh" class="btn btn-sm">刷新</button>
                     </div>
+                    <div id="sftp-progress" class="sftp-progress hidden">
+                        <span id="sftp-progress-label" class="sftp-progress-label"></span>
+                        <div id="sftp-progress-track" class="sftp-progress-track"
+                             role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                            <div id="sftp-progress-bar" class="sftp-progress-bar"></div>
+                        </div>
+                        <span id="sftp-progress-text" class="sftp-progress-text"></span>
+                        <button id="sftp-progress-cancel" class="btn btn-xs" title="中止本次上传">取消</button>
+                    </div>
                     <div id="sftp-file-list" class="list-container"></div>
                 </div>
             </div>

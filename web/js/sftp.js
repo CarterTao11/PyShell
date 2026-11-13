@@ -388,8 +388,6 @@ const SFTPManager = {
         }
         if (!files || files.length === 0) return;
 
-        const status = document.getElementById('sftp-status');
-
         // 统一为 {relPath, file}：File 对象取 webkitRelativePath（文件夹
         // 选择时非空），拖拽遍历得到的是 {relPath, file} 包装对象
         const entries = Array.from(files).map(f =>
@@ -399,64 +397,282 @@ const SFTPManager = {
 
         const { planned, dirs } = this._planUploads(this.currentPath, entries);
 
-        // 先递归创建所有目标目录（mkdir -p，已存在的目录直接复用）
-        let di = 0;
-        for (const d of dirs) {
-            if (status) status.textContent = `准备目录 (${++di}/${dirs.size}): ${d}`;
-            try {
-                const res = await fetch(`/api/sftp/mkdir/${connId}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ path: d, recursive: true }),
-                });
-                const r = await res.json();
-                if (!r.success) {
-                    showToast(`创建目录失败: ${d} — ${r.error || '未知错误'}`, 'error');
-                    if (status) status.textContent = '';
-                    return;
-                }
-            } catch (err) {
-                showToast('创建目录错误: ' + err.message, 'error');
-                if (status) status.textContent = '';
-                return;
-            }
+        // 同一时刻只跑一批：进度条只有一个，两批并发会互相覆盖（也会抢同名文件）
+        if (this._uploading) {
+            showToast('正在上传，请等当前批次结束或点"取消"', 'warning');
+            return;
         }
+        this._uploading = true;
+        this._uploadAbort = false;
+        this._uploadXhr = null;
+        this._setUploadButtonsEnabled(false);
 
-        // 上传文件（同名文件直接覆盖）
+        const startedAt = Date.now();
         let ok = 0;
-        try {
-            for (let j = 0; j < planned.length; j++) {
-                const e = planned[j];
-                if (status) {
-                    status.textContent = `上传中 ${j + 1}/${planned.length}: ${e.relPath}`;
-                }
-                const formData = new FormData();
-                formData.append('file', e.file);
-                formData.append('path', e.targetDir);
+        let aborted = false;
+        let failed = false;
 
-                const res = await fetch(`/api/sftp/upload/${connId}`, {
-                    method: 'POST',
-                    body: formData,
-                });
-                const result = await res.json();
-                if (!result.success) {
-                    showToast(`上传失败: ${e.relPath} — ${result.error || '未知错误'}`, 'error');
+        try {
+            // 阶段一：递归创建目标目录（mkdir -p，已存在直接复用）
+            this._progressShow();
+            const token = this._progressToken;
+            let di = 0;
+            for (const d of dirs) {
+                if (this._uploadAbort) { aborted = true; break; }
+                this._progressSet(`准备目录 ${++di}/${dirs.size} · ${d}`, 0, '准备中…');
+                const r = await this._postJSON(`/api/sftp/mkdir/${connId}`, { path: d, recursive: true });
+                if (!r.success) {
+                    failed = true;
+                    showToast(`创建目录失败: ${d} — ${r.error || '未知错误'}`, 'error');
                     break;
                 }
-                ok++;
             }
-            if (status) {
-                status.textContent = ok > 0 ? `已上传/覆盖 ${ok} 个文件` : '';
-                if (ok > 0) {
+
+            // 阶段二：逐个上传（按总字节算整体进度，进度条不会一个文件就跳满）
+            if (!aborted && !failed) {
+                const totalBytes = planned.reduce((s, e) => s + (e.file.size || 0), 0);
+                let doneBytes = 0;
+                const state = { totalBytes, startedAt };
+
+                for (let j = 0; j < planned.length; j++) {
+                    if (this._uploadAbort) { aborted = true; break; }
+                    const e = planned[j];
+                    const size = e.file.size || 0;
+                    this._renderProgress({
+                        fileIndex: j, totalFiles: planned.length, name: e.relPath,
+                        loaded: 0, total: size, doneBytes, totalBytes, startedAt,
+                    });
+                    const r = await this._uploadOne(connId, e.file, e.targetDir, (loaded, total) => {
+                        this._renderProgress({
+                            fileIndex: j, totalFiles: planned.length, name: e.relPath,
+                            loaded, total: total || size, doneBytes, totalBytes, startedAt,
+                        });
+                    });
+                    if (r.aborted) {
+                        aborted = true;
+                        // 中止时远端大概率已经留下半个文件：尽力删掉，别让同名文件被截断成半截
+                        const remote = (e.targetDir + '/' + e.file.name).replace('//', '/');
+                        try {
+                            await this._postJSON(`/api/sftp/delete/${connId}`, { path: remote });
+                        } catch (err) { /* 清理失败不影响取消流程 */ }
+                        break;
+                    }
+                    if (!r.ok) {
+                        failed = true;
+                        showToast(`上传失败: ${e.relPath} — ${r.error || '未知错误'}`, 'error');
+                        break;
+                    }
+                    doneBytes += size;
+                    ok++;
+                }
+
+                if (!aborted && !failed && ok > 0) {
+                    this._renderProgress({
+                        fileIndex: planned.length - 1, totalFiles: planned.length, name: '',
+                        loaded: totalBytes, total: totalBytes,
+                        doneBytes: totalBytes, totalBytes, startedAt, finished: true,
+                    });
                     showToast(`已上传 ${ok} 个文件`, 'success');
-                    setTimeout(() => { status.textContent = ''; }, 3000);
+                    // 留 1.2s 让用户看到 100%，再收起
+                    setTimeout(() => {
+                        if (this._progressToken === token) this._progressHide();
+                    }, 1200);
                 }
             }
+            if (aborted) showToast('上传已取消（已清理远端未完成的文件）', 'warning');
         } catch (err) {
+            failed = true;
             showToast('上传错误: ' + err.message, 'error');
-            if (status) status.textContent = '';
         } finally {
-            this.browse(connId, this.currentPath, { syncTerminal: false });
+            this._uploading = false;
+            this._uploadAbort = false;
+            this._uploadXhr = null;
+            this._setUploadButtonsEnabled(true);
+            // 失败留 1.5s 红色条让人看见；取消立刻收；成功那条走上面的定时
+            if (failed && planned.length) {
+                this._progressMarkError();
+                const token2 = this._progressToken;
+                setTimeout(() => {
+                    if (this._progressToken === token2) this._progressHide();
+                }, 1500);
+            } else if (aborted) {
+                this._progressHide();
+            }
+            if (planned.length) this.browse(connId, this.currentPath, { syncTerminal: false });
+        }
+    },
+
+    /** POST JSON，返回解析后的结果（失败时不抛异常，交给调用方判断 success） */
+    async _postJSON(url, payload) {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        try {
+            return await res.json();
+        } catch (e) {
+            return { success: false, error: `HTTP ${res.status}` };
+        }
+    },
+
+    /**
+     * 上传单个文件：必须用 XHR —— fetch 拿不到上传进度事件，
+     * 大文件用 fetch 时界面会从 0 直接跳到 100%，这就是"进度条不动"的根因。
+     */
+    _uploadOne(connId, file, dirPath, onProgress) {
+        return new Promise(resolve => {
+            const xhr = new XMLHttpRequest();
+            this._uploadXhr = xhr;
+            let settled = false;
+            const done = (result) => {
+                if (settled) return;
+                settled = true;
+                if (this._uploadXhr === xhr) this._uploadXhr = null;
+                resolve(result);
+            };
+
+            xhr.open('POST', `/api/sftp/upload/${connId}`, true);
+            if (xhr.upload) {
+                xhr.upload.onprogress = (e) => {
+                    if (!e.lengthComputable) return;
+                    try { onProgress(e.loaded, e.total); } catch (err) { /* 渲染异常不影响传输 */ }
+                };
+            }
+            xhr.onload = () => {
+                let result = {};
+                try { result = JSON.parse(xhr.responseText || '{}'); } catch (e) { /* 非 JSON */ }
+                const httpOk = xhr.status >= 200 && xhr.status < 300;
+                done({
+                    ok: httpOk && result.success !== false,
+                    error: result.error || (httpOk ? '' : `HTTP ${xhr.status}`),
+                });
+            };
+            xhr.onerror = () => done({ ok: false, error: '网络错误' });
+            xhr.ontimeout = () => done({ ok: false, error: '请求超时' });
+            xhr.onabort = () => done({ ok: false, aborted: true, error: '已取消' });
+
+            const form = new FormData();
+            form.append('file', file);
+            form.append('path', dirPath);
+            xhr.send(form);
+        });
+    },
+
+    /** 取消当前上传（中止正在传的文件，队列不再继续） */
+    cancelUpload() {
+        if (!this._uploading) return;
+        this._uploadAbort = true;
+        const xhr = this._uploadXhr;
+        if (xhr) {
+            try { xhr.abort(); } catch (e) { /* 已结束 */ }
+        }
+    },
+
+    _setUploadButtonsEnabled(on) {
+        ['btn-sftp-upload', 'btn-sftp-upload-folder'].forEach(id => {
+            const btn = document.getElementById(id);
+            if (btn) btn.disabled = !on;
+        });
+    },
+
+    // ---- 进度条渲染 ----
+
+    _progressShow() {
+        this._progressToken = (this._progressToken || 0) + 1;
+        const box = document.getElementById('sftp-progress');
+        if (!box) return;
+        box.classList.remove('hidden');
+        const bar = document.getElementById('sftp-progress-bar');
+        if (bar) bar.classList.remove('is-flushing', 'is-error');
+        this._progressSet('', 0, '');
+    },
+
+    _progressHide() {
+        const box = document.getElementById('sftp-progress');
+        if (box) box.classList.add('hidden');
+        const bar = document.getElementById('sftp-progress-bar');
+        if (bar) {
+            bar.style.width = '0%';
+            bar.classList.remove('is-flushing', 'is-error');
+        }
+        const track = document.getElementById('sftp-progress-track');
+        if (track) track.setAttribute('aria-valuenow', '0');
+    },
+
+    _progressMarkError() {
+        const bar = document.getElementById('sftp-progress-bar');
+        if (bar) {
+            bar.classList.remove('is-flushing');
+            bar.classList.add('is-error');
+        }
+    },
+
+    _progressSet(label, pct, text) {
+        const box = document.getElementById('sftp-progress');
+        if (!box) return;
+        const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
+        const labelEl = document.getElementById('sftp-progress-label');
+        const textEl = document.getElementById('sftp-progress-text');
+        const bar = document.getElementById('sftp-progress-bar');
+        const track = document.getElementById('sftp-progress-track');
+        if (labelEl) labelEl.textContent = label || '';
+        if (textEl) textEl.textContent = text || '';
+        if (bar) bar.style.width = clamped + '%';
+        if (track) track.setAttribute('aria-valuenow', String(Math.round(clamped)));
+    },
+
+    /** 字节数（0 也要有单位，进度文本里不能出现 "0/2.5 MB" 这种空档） */
+    _formatBytes(n) {
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        let size = Math.abs(Number(n) || 0);
+        let i = 0;
+        while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+        // 512 KB 比 512.0 KB 好读；小于 10 的才保留一位小数
+        const digits = i === 0 ? 0 : (size >= 10 ? 0 : 1);
+        return size.toFixed(digits) + ' ' + units[i];
+    },
+
+    /**
+     * 进度条 = 整批文件的总字节进度（单个文件时与文件进度一致）。
+     * 文字 = 当前文件字节 + 速度；HTTP 发完到服务器返回之间是"写入远端"阶段。
+     */
+    _renderProgress(p) {
+        const totalBytes = p.totalBytes || 0;
+        const loaded = Math.max(0, Math.min(p.loaded || 0, p.total || 0));
+        const doneBytes = p.doneBytes || 0;
+        let pct;
+        if (totalBytes > 0) {
+            pct = ((doneBytes + loaded) / totalBytes) * 100;
+        } else {
+            // 全是 0 字节文件：退化成按文件个数算
+            pct = (p.fileIndex / Math.max(1, p.totalFiles)) * 100;
+        }
+
+        const filePct = p.total > 0 ? Math.min(100, (loaded / p.total) * 100) : (p.finished ? 100 : 0);
+        const flushing = !p.finished && p.total > 0 && loaded >= p.total;
+        const elapsed = Math.max(0.3, (Date.now() - (p.startedAt || Date.now())) / 1000);
+        const speed = (doneBytes + loaded) / elapsed;
+
+        const label = p.finished
+            ? `完成 ${p.totalFiles}/${p.totalFiles}`
+            : `${p.fileIndex + 1}/${p.totalFiles} · ${p.name}`;
+
+        let text;
+        if (p.finished) {
+            text = `100% · ${this._formatBytes(totalBytes)}`;
+        } else if (flushing) {
+            text = `${filePct.toFixed(0)}% · 写入远端…`;
+        } else {
+            text = `${pct.toFixed(0)}% · ${this._formatBytes(loaded)}/${this._formatBytes(p.total)}`
+                + (speed > 0 ? ` · ${this._formatBytes(speed)}/s` : '');
+        }
+
+        this._progressSet(label, pct, text);
+        const bar = document.getElementById('sftp-progress-bar');
+        if (bar) {
+            bar.classList.toggle('is-flushing', !!flushing);
+            bar.classList.remove('is-error');
         }
     },
 
