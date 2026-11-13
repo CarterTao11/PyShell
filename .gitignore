@@ -271,3 +271,4 @@ CLAUDE.md
 CLAUDE.md
 ./data/*
 *.db
+./tests/*
