@@ -67,6 +67,40 @@ const SessionManager = {
         return this.sessions.find(s => s.id === id);
     },
 
+    /** 会话的显示状态：connecting / connected / error / offline（未连接） */
+    _stateOf(id) {
+        const st = TerminalManager.connectionStates
+            ? TerminalManager.connectionStates.get(id)
+            : undefined;
+        if (st === 'error') return 'error';
+        if (st === 'connecting') return 'connecting';
+        if (TerminalManager.connectedSessions.has(id)) return 'connected';
+        return 'offline';
+    },
+
+    _stateTitle(state) {
+        switch (state) {
+            case 'connected': return '已连接';
+            case 'connecting': return '正在连接…';
+            case 'error': return '连接失败 / 已断开';
+            default: return '未连接';
+        }
+    },
+
+    /** 只更新状态灯，不重建列表：重建会丢滚动位置，也会打断正在点的按钮 */
+    refreshStatus() {
+        const container = document.getElementById('session-list');
+        if (!container) return;
+        container.querySelectorAll('.session-item').forEach(el => {
+            const id = parseInt(el.dataset.sessionId);
+            const state = this._stateOf(id);
+            el.classList.toggle('connected', state === 'connected');
+            el.classList.toggle('connecting', state === 'connecting');
+            el.classList.toggle('error', state === 'error');
+            el.title = this._stateTitle(state);
+        });
+    },
+
     render() {
         const container = document.getElementById('session-list');
         if (!container) return;
@@ -88,9 +122,10 @@ const SessionManager = {
         for (const [group, items] of Object.entries(groups)) {
             html += `<div class="session-group-label">${group}</div>`;
             items.forEach(s => {
-                const isConnected = TerminalManager.connectedSessions.has(s.id);
+                const state = this._stateOf(s.id);
                 html += `
-                    <div class="session-item${isConnected ? ' connected' : ''}" data-session-id="${s.id}">
+                    <div class="session-item${state === 'connected' ? ' connected' : ''}${state === 'connecting' ? ' connecting' : ''}${state === 'error' ? ' error' : ''}"
+                         data-session-id="${s.id}" title="${this._stateTitle(state)}">
                         <div class="session-item-name">${this._escapeHtml(s.name || s.host)}</div>
                         <div class="session-item-host">${s.username}@${s.host}:${s.port}</div>
                         <div class="session-item-info">${s.auth_type}${s.tags && s.tags.length ? ' | ' + s.tags.join(', ') : ''}</div>

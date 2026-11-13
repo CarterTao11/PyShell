@@ -6,6 +6,9 @@
 const TerminalManager = {
     instances: new Map(),      // conn_id -> { term, fit, sessionId, eventSource }
     connectedSessions: new Set(),  // sessionId set
+    // 会话连接状态: sessionId -> 'connecting' | 'connected' | 'error'
+    // （connectedSessions 只能表达"连上了没有"，状态灯还要区分"正在连"和"连接失败"）
+    connectionStates: new Map(),
     activeConnId: null,
     nextConnId: 1,
     // 分屏状态: splitV 为 true 表示左右分屏, splitH 为 true 表示上下分屏
@@ -28,6 +31,9 @@ const TerminalManager = {
     async connect(sessionId, config) {
         const connId = 'conn_' + (this.nextConnId++);
 
+        // 状态灯：一进 connect 就点黄灯（含输密码/换主机指纹的等待期）
+        this._setSessionState(sessionId, 'connecting');
+
         // Try to connect
         const res = await fetch('/api/ssh/connect', {
             method: 'POST',
@@ -43,6 +49,7 @@ const TerminalManager = {
             const accepted = await this._confirmHostKey(fp);
             if (!accepted) {
                 showToast('已取消连接', 'warning');
+                this._setSessionState(sessionId, null);
                 return false;
             }
             // User accepted, save host key and retry connection
@@ -56,12 +63,14 @@ const TerminalManager = {
             const retryResult = await retryRes.json();
             if (!retryResult.success) {
                 showToast('连接失败: ' + (retryResult.error || '未知错误'), 'error');
+                this._setSessionState(sessionId, 'error');
                 return false;
             }
             // Use the retry connection result
             Object.assign(result, retryResult);
         } else if (!result.success) {
             showToast('连接失败: ' + (result.error || '未知错误'), 'error');
+            this._setSessionState(sessionId, 'error');
             return false;
         }
 
@@ -74,15 +83,27 @@ const TerminalManager = {
             await this._initHomeDir(actualConnId);
             this._createTerminal(actualConnId, sessionId, config);
             this.connectedSessions.add(sessionId);
+            this._setSessionState(sessionId, 'connected');
             this._startSSE(actualConnId);
             this.activateTerminal(actualConnId);
         } catch (e) {
             console.error('Terminal init failed:', e);
             showToast('终端初始化失败: ' + (e && e.message ? e.message : e), 'error');
+            this._setSessionState(sessionId, 'error');
             return false;
         }
 
         return true;
+    },
+
+    /** 改一条会话的连接状态并立刻刷状态灯（不动列表结构，避免丢滚动位置） */
+    _setSessionState(sessionId, state) {
+        if (sessionId === undefined || sessionId === null) return;
+        if (state) this.connectionStates.set(sessionId, state);
+        else this.connectionStates.delete(sessionId);
+        if (typeof SessionManager !== 'undefined' && SessionManager.refreshStatus) {
+            SessionManager.refreshStatus();
+        }
     },
 
     _createTerminal(connId, sessionId, config) {
@@ -152,6 +173,16 @@ const TerminalManager = {
 
         const fit = new FitAddon.FitAddon();
         term.loadAddon(fit);
+
+        // Ctrl+F 归"终端内搜索"：返回 false 让 xterm 不要把 ^F 发给远端
+        // （不拦的话 bash/readline 会把它当成 forward-char，在 vim 里还会改光标）
+        // 真正的打开动作在 app.js 的 document 监听里做，那里才拦得住浏览器自带的查找框
+        term.attachCustomKeyEventHandler((e) => {
+            if (e.type !== 'keydown' || e.altKey) return true;
+            if (!(e.ctrlKey || e.metaKey)) return true;
+            if (e.key !== 'f' && e.key !== 'F') return true;
+            return false;
+        });
 
         // Handle window resize (global, single binding) — refits all visible panes
         if (!this._winResizeBound) {
@@ -232,11 +263,13 @@ const TerminalManager = {
         });
 
         // Store instance
-        this.instances.set(connId, {
+        const inst = {
             term, fit, sessionId, connId,
             termDiv, tab,
             eventSource: null,
-        });
+        };
+        this._outReset(inst);        // 输出管道的队列/水位状态
+        this.instances.set(connId, inst);
 
         // Show this terminal BEFORE opening/fitting it: the container is
         // display:none until activated, and fitting a hidden container
@@ -279,6 +312,9 @@ const TerminalManager = {
         es.addEventListener('closed', () => {
             inst.term.write('\r\n\x1b[33m[连接已断开]\x1b[0m\r\n');
             es.close();
+            // 远端掉的线（不是用户主动断）：红灯，提示需要重连
+            this.connectedSessions.delete(inst.sessionId);
+            this._setSessionState(inst.sessionId, 'error');
         });
 
         es.onmessage = (event) => {
@@ -289,11 +325,18 @@ const TerminalManager = {
                 for (let i = 0; i < decoded.length; i++) {
                     bytes[i] = decoded.charCodeAt(i);
                 }
-                inst.term.write(bytes);
+                // 不直接 term.write：交给有界队列限速（见 _feedOutput）
+                this._feedOutput(inst, bytes);
             } catch (e) {
                 console.error('SSE decode error:', e);
             }
         };
+
+        // 后端因为浏览器跟不上丢过字节：在终端里明说，别让用户以为看漏了
+        es.addEventListener('overflow', (event) => {
+            const lost = parseInt(event.data, 10) || 0;
+            if (lost > 0) this._noteDropped(inst, lost);
+        });
 
         es.onerror = () => {
             console.error('SSE error for', connId);
@@ -301,6 +344,200 @@ const TerminalManager = {
         };
 
         inst.eventSource = es;
+    },
+
+    // ===== 终端输出管道：有界队列 + 背压 =====
+    // xterm 的 write() 是异步的，它的内部写队列没有上限。`docker logs -f` 这类命令
+    // 一秒能吐几十 MB，如果收到一条 SSE 就 write 一条，写队列会无限增长，
+    // 浏览器标签最终被 OOM 干掉（表现就是"浏览器退出了"）。
+    // 这里自己做有界队列：一次只喂一块，等 xterm 解析回调再喂下一块；
+    // 队列超过高水位就丢最旧的（用户盯的是尾部），并把丢了多少明确写进终端。
+    OUTPUT_HIGH_WATER: 4 * 1024 * 1024,   // 待解析字节上限
+    OUTPUT_CHUNK: 256 * 1024,             // 单块最大字节
+    OUTPUT_DROP_NOTICE: 1024 * 1024,      // 累计丢到 1MB 才提示一次，免得刷屏
+
+    _humanBytes(n) {
+        if (n < 1024) return n + ' B';
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+        if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+        return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    },
+
+    _outReset(inst) {
+        inst.outQueue = [];
+        inst.outBytes = 0;
+        inst.outWriting = false;
+        inst.outDropped = 0;
+        inst.outDroppedPrinted = 0;
+    },
+
+    /** SSE 每来一条消息都走这里：切块入队、限水位、触发泵送 */
+    _feedOutput(inst, bytes) {
+        if (!inst.outQueue) this._outReset(inst);
+        const n = bytes.length;
+        if (!n) return;
+        for (let off = 0; off < n; off += this.OUTPUT_CHUNK) {
+            const part = bytes.subarray(off, Math.min(n, off + this.OUTPUT_CHUNK));
+            inst.outQueue.push(part);
+            inst.outBytes += part.length;
+        }
+        // 超水位：丢最旧的，保住最新的
+        while (inst.outBytes > this.OUTPUT_HIGH_WATER && inst.outQueue.length > 1) {
+            const dropped = inst.outQueue.shift();
+            inst.outBytes -= dropped.length;
+            inst.outDropped += dropped.length;
+        }
+        this._pumpOutput(inst);
+    },
+
+    /** 一次只写一块，写完了靠 xterm 的回调继续 —— 这是对 xterm 的唯一背压手段 */
+    _pumpOutput(inst) {
+        if (inst.outWriting) return;
+        const chunk = inst.outQueue.shift();
+        if (!chunk) {
+            this._flushDropNotice(inst);
+            return;
+        }
+        inst.outBytes -= chunk.length;
+        inst.outWriting = true;
+        this._flushDropNotice(inst);
+        inst.term.write(chunk, () => {
+            inst.outWriting = false;
+            this._pumpOutput(inst);
+        });
+    },
+
+    /** 丢弃提示按 1MB 为单位节流，洪水期也不会把屏幕刷满 */
+    _flushDropNotice(inst) {
+        const pending = inst.outDropped - inst.outDroppedPrinted;
+        if (pending < this.OUTPUT_DROP_NOTICE && inst.outQueue && inst.outQueue.length > 0) return;
+        if (pending <= 0) return;
+        inst.outDroppedPrinted = inst.outDropped;
+        this._noteDropped(inst, pending);
+    },
+
+    _noteDropped(inst, bytes) {
+        if (!inst || !inst.term || !bytes) return;
+        // 丢弃可能把某个转义序列切断，先复位一次颜色，别让后续输出整屏染色
+        const text = `\r\n\x1b[0m\x1b[33m[输出过快，浏览器来不及渲染，已丢弃约 ${this._humanBytes(bytes)} 未显示]\x1b[0m\r\n`;
+        inst.term.write(text);
+    },
+
+    // ===== 终端输出搜索（Ctrl+F）=====
+    // 不用浏览器自带的查找：它搜的是 HTML 文本，而终端内容在 canvas 里，命中不了也高亮不了。
+    // 这里直接扫 xterm 的缓冲区行文本，用 select() 选中 + scrollToLine 定位。
+    searchState: { open: false, query: '', hits: [], index: -1 },
+
+    _searchTerm() {
+        const inst = this.instances.get(this.activeConnId);
+        return inst && inst.term ? inst.term : null;
+    },
+
+    openSearch() {
+        const box = document.getElementById('terminal-search');
+        const input = document.getElementById('terminal-search-input');
+        if (!box || !input) return;
+        if (!this._searchTerm()) {
+            showToast('还没有打开的终端', 'warning');
+            return;
+        }
+        box.classList.remove('hidden');
+        this.searchState.open = true;
+        input.focus();
+        input.select();
+        if (this.searchState.query) this._runSearch(this.searchState.query, true);
+    },
+
+    closeSearch() {
+        const box = document.getElementById('terminal-search');
+        if (box) box.classList.add('hidden');
+        const st = this.searchState;
+        st.open = false;
+        st.hits = [];
+        st.index = -1;
+        this._setSearchCount('');
+        const term = this._searchTerm();
+        if (term) {
+            try { term.clearSelection(); } catch (e) { /* 已无选择 */ }
+            try { term.focus(); } catch (e) { /* ignore */ }
+        }
+    },
+
+    _setSearchCount(text) {
+        const el = document.getElementById('terminal-search-count');
+        if (el) el.textContent = text;
+    },
+
+    /** 扫当前活动终端的缓冲区，返回 [{row, col, len}]（row 为缓冲区绝对行号） */
+    _collectHits(term, query) {
+        const hits = [];
+        if (!term || !query) return hits;
+        const buf = term.buffer.active;
+        const lower = query.toLowerCase();
+        const total = buf.length;
+        for (let y = 0; y < total; y++) {
+            const line = buf.getLine(y);
+            if (!line) continue;
+            // 折行的续行跳过：续行只含后半截文本，列号会和屏幕对不上
+            if (line.isWrapped) continue;
+            const text = line.translateToString(true).toLowerCase();
+            let from = 0;
+            while (true) {
+                const at = text.indexOf(lower, from);
+                if (at < 0) break;
+                hits.push({ row: y, col: at, len: query.length });
+                from = at + Math.max(1, query.length);
+                if (hits.length >= 5000) return hits;   // 超长回滚缓冲的保护
+            }
+        }
+        return hits;
+    },
+
+    _runSearch(query, keepIndex) {
+        const st = this.searchState;
+        const term = this._searchTerm();
+        st.query = query || '';
+        if (!term || !st.query) {
+            st.hits = [];
+            st.index = -1;
+            this._setSearchCount(st.query ? '0/0' : '');
+            return;
+        }
+        st.hits = this._collectHits(term, st.query);
+        // 首次搜索默认落在最靠下的一处（和 tail -f 盯日志的直觉一致）
+        if (!keepIndex || st.index < 0 || st.index >= st.hits.length) {
+            st.index = st.hits.length > 0 ? st.hits.length - 1 : -1;
+        }
+        this._focusHit();
+    },
+
+    searchStep(dir) {
+        const st = this.searchState;
+        if (!st.open || !st.query) return;
+        if (st.hits.length === 0) {
+            this._runSearch(st.query, false);
+            return;
+        }
+        st.index = (st.index + (dir > 0 ? 1 : -1) + st.hits.length) % st.hits.length;
+        this._focusHit();
+    },
+
+    _focusHit() {
+        const st = this.searchState;
+        const term = this._searchTerm();
+        const hit = st.hits[st.index];
+        if (!term || !hit) {
+            this._setSearchCount('0/0');
+            return;
+        }
+        try {
+            term.select(hit.col, hit.row, hit.len);
+            const rows = term.rows || 24;
+            term.scrollToLine(Math.max(0, hit.row - Math.floor(rows / 3)));
+        } catch (e) {
+            console.warn('[search] focus failed:', e);
+        }
+        this._setSearchCount(`${st.index + 1}/${st.hits.length}`);
     },
 
     _sendInput(connId, data) {
@@ -700,6 +937,16 @@ const TerminalManager = {
         const inst = this.instances.get(connId);
         if (!inst) return;
 
+        // 切窗格/切标签时旧终端的搜索高亮必须收起，否则会留在被切走的那一屏
+        if (this.searchState && this.searchState.open) {
+            const box = document.getElementById('terminal-search');
+            if (box) box.classList.add('hidden');
+            this.searchState.open = false;
+            this.searchState.hits = [];
+            this.searchState.index = -1;
+            this._setSearchCount('');
+        }
+
         this._prevActive = this.activeConnId;
         this.activeConnId = connId;
 
@@ -884,6 +1131,8 @@ const TerminalManager = {
             .some(([id, other]) => id !== connId && other.sessionId === inst.sessionId);
         if (!stillConnected) {
             this.connectedSessions.delete(inst.sessionId);
+            // 用户主动断开：状态归零（灯灭），不是"连接失败"
+            this._setSessionState(inst.sessionId, null);
         }
 
         // API disconnect
@@ -901,6 +1150,7 @@ const TerminalManager = {
         inst.tab.remove();
         inst.termDiv.remove();
 
+        this._outReset(inst);        // 丢掉还没喂给 xterm 的输出，别再往已销毁的终端里写
         inst.term.dispose();
         this.instances.delete(connId);
         this.cwdMap.delete(connId);

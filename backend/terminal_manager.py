@@ -1,4 +1,3 @@
-import queue
 import logging
 import threading
 import paramiko
@@ -10,11 +9,21 @@ logger = logging.getLogger(__name__)
 class TerminalSession:
     """Represents a single terminal session (channel)."""
 
+    # 浏览器消费不过来的保护线：
+    #   MAX_OUTPUT_BUFFER 未读输出上限（超了就丢最旧的，保住最新的）
+    #   READ_CHUNK 单次交给 SSE 的最大字节数（把"一条命令刷屏"合并成大块，
+    #   否则每个 64KB recv 都变成一次 SSE 事件，浏览器被几千次/秒的事件压垮）
+    MAX_OUTPUT_BUFFER = 8 * 1024 * 1024
+    READ_CHUNK = 128 * 1024
+
     def __init__(self, conn_id: str, ssh_client: PySSHClient):
         self.conn_id = conn_id
         self.ssh_client = ssh_client
         self.channel = None
-        self.output_queue = queue.Queue()
+        self._out_buf = bytearray()
+        self._out_lock = threading.Lock()
+        self._out_ready = threading.Condition(self._out_lock)
+        self.dropped_bytes = 0      # 因为消费端跟不上而丢掉的字节数
         self._reader_thread = None
         self._running = False
         self.closed = False  # True once the SSH channel has ended
@@ -36,14 +45,14 @@ class TerminalSession:
         self._reader_thread.start()
 
     def _reader_loop(self):
-        """Continuously read from channel and put into queue."""
+        """Continuously read from channel and append to the bounded output buffer."""
         import time
         while self._running:
             try:
                 if self.channel and self.channel.recv_ready():
                     data = self.channel.recv(65536)
                     if data:
-                        self.output_queue.put(data)
+                        self._append_output(data)
                 elif self.channel and self.channel.exit_status_ready():
                     break
                 else:
@@ -55,7 +64,23 @@ class TerminalSession:
 
         self._running = False
         self.closed = True
-        self.output_queue.put(None)  # Sentinel
+        with self._out_ready:
+            self._out_ready.notify_all()
+
+    def _append_output(self, data: bytes):
+        """Append output with a hard cap; drop the oldest bytes when over the cap.
+
+        不做无界队列：`docker logs -f` 这类命令一秒能产生几十 MB，SSE 端根本
+        追不上，无界队列会先把后端内存吃光，再把浏览器的 xterm 写队列一起拖爆。
+        丢最旧的、留最新的 —— 用户盯的是尾部。
+        """
+        with self._out_ready:
+            self._out_buf.extend(data)
+            overflow = len(self._out_buf) - self.MAX_OUTPUT_BUFFER
+            if overflow > 0:
+                del self._out_buf[:overflow]
+                self.dropped_bytes += overflow
+            self._out_ready.notify_all()
 
     def write(self, data: str):
         """Send input to the terminal."""
@@ -70,14 +95,18 @@ class TerminalSession:
             self.channel.resize_pty(width=cols, height=rows)
 
     def read_output(self, timeout: float = 0.1) -> bytes:
-        """Read one chunk of output from queue."""
-        try:
-            data = self.output_queue.get(timeout=timeout)
-            if data is None:
+        """Take up to READ_CHUNK bytes.
+
+        阻塞到有数据或超时；有数据就一次给一大块（把突发输出合并成少量 SSE 事件）。
+        """
+        with self._out_ready:
+            if not self._out_buf and not self.closed:
+                self._out_ready.wait(timeout)
+            if not self._out_buf:
                 return b""
+            data = bytes(self._out_buf[:self.READ_CHUNK])
+            del self._out_buf[:self.READ_CHUNK]
             return data
-        except queue.Empty:
-            return b""
 
     def close(self):
         """Close the terminal session."""

@@ -696,6 +696,248 @@ const SFTPManager = {
         await this.upload(connId, files);
     },
 
+    // ===== 目录差异对比（单向镜像：本地 → 远端）=====
+    // 判定口径：大小相同、且 mtime 差在容差内 = 相同；否则算变化。
+    // 远端多出来的文件只列出、不删除（不做双向同步：冲突策略会拖垮维护成本）。
+    // 只比较大小/时间，不算 md5 —— 后端没有 hash 接口，加一个要为每个文件传一遍
+    // 内容，慢得没有意义；真要严格校验，整目录重传比逐文件 md5 更省事。
+
+    DIFF_MTIME_TOLERANCE_MS: 2000,
+    DIFF_MAX_ENTRIES: 20000,
+    DIFF_MAX_DEPTH: 24,
+
+    async diffUpload(connId) {
+        if (!connId) {
+            showToast('请先连接一个终端', 'warning');
+            return;
+        }
+        if (this._uploading) {
+            showToast('正在上传，请等当前批次结束或点"取消"', 'warning');
+            return;
+        }
+
+        const picked = await this._pickLocalDir();
+        if (!picked || picked.length === 0) return;
+
+        // webkitRelativePath 形如 "proj/sub/a.txt"，第一段是被选中的文件夹名
+        const topName = String(picked[0].relPath).split('/')[0] || 'folder';
+        const remoteRoot = this.normalizePath((this.currentPath || '/') + '/' + topName);
+        this._setStatus('正在对比 ' + remoteRoot + ' …');
+
+        try {
+            const tree = await this._listRemoteTree(connId, remoteRoot);
+            const diff = this._diffTrees(picked, topName, tree, remoteRoot);
+            this._clearStatus();
+            this._showDiffPreview(connId, diff);
+        } catch (err) {
+            console.error('SFTP diff failed:', err);
+            this._clearStatus();
+            showToast('对比失败: ' + err.message, 'error');
+        }
+    },
+
+    /** 选一个本地文件夹，返回 [{relPath, file}]（relPath 含顶层文件夹名，反斜杠统一成 /） */
+    async _pickLocalDir() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.webkitdirectory = true;
+        input.multiple = true;
+        const files = await new Promise(resolve => {
+            input.onchange = () => resolve(input.files);
+            input.oncancel = () => resolve(null);
+            input.click();
+        });
+        if (!files || files.length === 0) return null;
+        return Array.from(files).map(f => ({
+            relPath: String(f.webkitRelativePath || f.name).replace(/\\/g, '/'),
+            file: f,
+        }));
+    },
+
+    /**
+     * 递归列出远端目录树（一次一个目录，逐层 BFS —— 后端 list 接口本来就不支持递归）
+     * 返回 { files: Map<rel, {size, mtime}>, dirs: Set<rel>, missing }；
+     * missing = 远端根目录还不存在，等于"整目录全新"，不是错误。
+     */
+    async _listRemoteTree(connId, root) {
+        const files = new Map();
+        const dirs = new Set();
+        const queue = [{ path: root, rel: '' }];
+        let seen = 0;
+
+        while (queue.length > 0) {
+            const cur = queue.shift();
+            const res = await fetch(`/api/sftp/list/${connId}?path=${encodeURIComponent(cur.path)}`);
+            const result = await res.json();
+
+            if (!result.success) {
+                if (cur.rel === '') return { files, dirs, missing: true };
+                throw new Error(result.error || ('无法列出 ' + cur.path));
+            }
+
+            for (const item of (result.items || [])) {
+                const childRel = cur.rel ? cur.rel + '/' + item.name : item.name;
+                if (item.is_dir) {
+                    if (childRel.split('/').length > this.DIFF_MAX_DEPTH) continue;
+                    dirs.add(childRel);
+                    queue.push({ path: this.normalizePath(cur.path + '/' + item.name), rel: childRel });
+                } else {
+                    files.set(childRel, { size: item.size || 0, mtime: item.mtime || 0 });
+                }
+            }
+
+            seen += (result.items || []).length;
+            if (seen > this.DIFF_MAX_ENTRIES) {
+                throw new Error(`远端条目过多（超过 ${this.DIFF_MAX_ENTRIES} 项），请缩小对比范围`);
+            }
+        }
+        return { files, dirs, missing: false };
+    },
+
+    /** 比较本地文件列表与远端树，产出每个文件的去向 */
+    _diffTrees(entries, topName, tree, remoteRoot) {
+        const items = [];
+        const localKeys = new Set();
+        const tol = this.DIFF_MTIME_TOLERANCE_MS;
+
+        for (const e of entries) {
+            const rel = String(e.relPath).slice(topName.length + 1);
+            if (!rel) continue;                       // 顶层文件夹自身
+            localKeys.add(rel);
+
+            if (tree.dirs.has(rel)) {
+                items.push({ state: 'conflict', rel, local: e.file, remote: null,
+                             reason: '远端同名的是目录' });
+                continue;
+            }
+
+            const remote = tree.files.get(rel);
+            const localSize = e.file.size || 0;
+            const localMtime = e.file.lastModified || 0;
+
+            if (!remote) {
+                items.push({ state: 'new', rel, local: e.file, remote: null });
+                continue;
+            }
+
+            const sameSize = remote.size === localSize;
+            const closeTime = Math.abs(remote.mtime * 1000 - localMtime) <= tol;
+            if (sameSize && closeTime) {
+                items.push({ state: 'same', rel, local: e.file, remote });
+            } else {
+                items.push({
+                    state: 'changed', rel, local: e.file, remote,
+                    reason: sameSize ? '时间不同' : '大小不同',
+                });
+            }
+        }
+
+        const extraFiles = [];
+        tree.files.forEach((v, rel) => { if (!localKeys.has(rel)) extraFiles.push({ rel, size: v.size, mtime: v.mtime }); });
+        const extraDirs = [];
+        tree.dirs.forEach(rel => { if (!localKeys.has(rel)) extraDirs.push(rel); });
+
+        const counts = { new: 0, changed: 0, same: 0, conflict: 0,
+                         extra: extraFiles.length, extraDir: extraDirs.length };
+        items.forEach(i => { counts[i.state] = (counts[i.state] || 0) + 1; });
+
+        return { items, extraFiles, extraDirs, counts, remoteRoot, topName, missing: tree.missing };
+    },
+
+    /** 渲染差异预览弹层；确认才上传，取消就什么都不做 */
+    _showDiffPreview(connId, diff) {
+        const overlay = document.getElementById('sftp-diff-overlay');
+        if (!overlay) return;
+
+        const toSend = diff.items.filter(i => i.state === 'new' || i.state === 'changed');
+        const totalBytes = toSend.reduce((sum, i) => sum + (i.local.size || 0), 0);
+        this._diffPending = {
+            connId,
+            entries: toSend.map(i => ({ relPath: diff.topName + '/' + i.rel, file: i.local })),
+        };
+
+        const head = document.getElementById('sftp-diff-head');
+        head.innerHTML = `本地 <b>${this._escapeHtml(diff.topName)}/</b> → 远端 <b>${this._escapeHtml(diff.remoteRoot)}</b>`
+            + (diff.missing ? '<span class="sftp-diff-new-dir">（远端还没有这个目录，将新建）</span>' : '');
+
+        const c = diff.counts;
+        const chips = [
+            `<span class="diff-chip new">新增 ${c.new}</span>`,
+            `<span class="diff-chip changed">更新 ${c.changed}</span>`,
+            `<span class="diff-chip same">相同 ${c.same}（跳过）</span>`,
+        ];
+        if (c.conflict) chips.push(`<span class="diff-chip conflict">类型冲突 ${c.conflict}</span>`);
+        chips.push(`<span class="diff-chip extra">远端多出 ${c.extra} 个文件`
+            + (c.extraDir ? ` / ${c.extraDir} 个目录` : '') + '</span>');
+        document.getElementById('sftp-diff-summary').innerHTML = chips.join('');
+
+        // 列表里不再重复"相同"项（只在上面的 chip 里报个数），否则一眼看不过来
+        const MAX_ROWS = 400;
+        let shown = 0;
+        let html = '';
+        for (const i of diff.items) {
+            if (i.state === 'same') continue;
+            if (shown++ >= MAX_ROWS) break;
+            html += this._diffRow(i);
+        }
+        if (diff.extraFiles.length > 0) {
+            html += `<div class="diff-section">远端多出来（不会删除）</div>`;
+            for (const f of diff.extraFiles) {
+                if (shown++ >= MAX_ROWS) break;
+                html += `<div class="diff-row extra">
+                    <span class="diff-badge">旧</span>
+                    <span class="diff-path" title="${this._escapeHtml(f.rel)}">${this._escapeHtml(f.rel)}</span>
+                    <span class="diff-info">${this._formatSize(f.size)}</span></div>`;
+            }        }
+        const omitted = (diff.items.filter(i => i.state !== 'same').length + diff.extraFiles.length) - shown;
+        if (omitted > 0) {
+            html += `<div class="diff-omitted">还有 ${omitted} 项未列出（只影响显示，不影响实际对比）</div>`;
+        }
+        document.getElementById('sftp-diff-list').innerHTML = html || '<div class="diff-empty">没有需要处理的差异</div>';
+
+        const applyBtn = document.getElementById('btn-sftp-diff-apply');
+        if (applyBtn) {
+            applyBtn.disabled = toSend.length === 0;
+            applyBtn.textContent = toSend.length === 0
+                ? '没有需要上传的文件'
+                : `上传 ${toSend.length} 个文件（${this._formatBytes(totalBytes)}）`;
+        }
+
+        overlay.classList.remove('hidden');
+    },
+
+    _diffRow(i) {
+        const badge = { new: '新增', changed: '更新', conflict: '冲突' }[i.state] || '?';
+        let info = this._formatSize(i.local.size || 0);
+        if (i.state === 'changed' && i.remote) {
+            // 箭头方向 = 数据流向：远端旧 → 本地新
+            info = `${this._formatSize(i.remote.size || 0)} → ${this._formatSize(i.local.size || 0)} · ${i.reason}`;
+        } else if (i.state === 'conflict') {
+            info = i.reason;
+        }
+        return `<div class="diff-row ${i.state}">
+            <span class="diff-badge">${badge}</span>
+            <span class="diff-path" title="${this._escapeHtml(i.rel)}">${this._escapeHtml(i.rel)}</span>
+            <span class="diff-info">${this._escapeHtml(info)}</span></div>`;
+    },
+
+    closeDiffPreview() {
+        const overlay = document.getElementById('sftp-diff-overlay');
+        if (overlay) overlay.classList.add('hidden');
+        this._diffPending = null;
+    },
+
+    async applyDiffUpload() {
+        const pending = this._diffPending;
+        if (!pending || pending.entries.length === 0) {
+            this.closeDiffPreview();
+            return;
+        }
+        this.closeDiffPreview();
+        // 复用普通上传流程：递归 mkdir + 进度条 + 取消清理，这里不另写一条
+        await this.upload(pending.connId, pending.entries);
+    },
+
     // ---- 拖拽目录/文件遍历 (DataTransferItem.webkitGetAsEntry) ----
 
     _entryFile(entry) {

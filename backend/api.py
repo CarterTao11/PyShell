@@ -246,18 +246,38 @@ def ssh_output(conn_id):
         # Send initial connected event
         yield "event: connected\ndata: ok\n\n"
 
+        reported_dropped = 0
+        idle_ticks = 0
         while True:
             try:
-                data = terminal.read_output(timeout=0.5)
+                # 有数据就尽量连着取（每次最多 READ_CHUNK），把刷屏合并成大块再发；
+                # 取不到才退化成心跳，避免浏览器被几千个事件/秒打爆
+                data = terminal.read_output(timeout=0.2)
                 if data:
+                    idle_ticks = 0
+                    # 突发期把后续块拼在一起（最多约 512KB/事件），
+                    # 否则 128KB 一块也要几百个事件/秒，EventSource 分发本身就成了瓶颈
+                    for _ in range(3):
+                        more = terminal.read_output(timeout=0)
+                        if not more:
+                            break
+                        data += more
                     yield f"data: {base64.b64encode(data).decode('ascii')}\n\n"
-                elif terminal.closed:
+                    # 后端因为浏览器跟不上而丢过字节：明确告诉前端，别让用户以为看漏了
+                    dropped = getattr(terminal, "dropped_bytes", 0)
+                    if dropped > reported_dropped:
+                        lost = dropped - reported_dropped
+                        reported_dropped = dropped
+                        yield f"event: overflow\ndata: {lost}\n\n"
+                    continue
+                if terminal.closed:
                     # SSH channel has ended and all output was drained;
                     # tell the client and stop streaming.
                     yield "event: closed\ndata: ok\n\n"
                     break
-                else:
-                    # Send heartbeat to keep connection alive
+                idle_ticks += 1
+                # 每 0.2s 一次空转，心跳每 10s 一次就够（太频繁只是在浪费带宽）
+                if idle_ticks % 50 == 0:
                     yield ": heartbeat\n\n"
             except GeneratorExit:
                 break

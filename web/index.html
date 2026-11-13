@@ -6,7 +6,7 @@
     <title>PyShell - SSH 客户端</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cdefs%3E%3ClinearGradient id='term' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0%25' stop-color='%2324273a'/%3E%3Cstop offset='100%25' stop-color='%23181825'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='512' height='512' rx='112' fill='%231e1e2e'/%3E%3Crect x='56' y='76' width='400' height='360' rx='32' fill='url(%23term)' stroke='%23313244' stroke-width='3'/%3E%3Crect x='56' y='76' width='400' height='56' rx='32' fill='%2324273a'/%3E%3Crect x='56' y='104' width='400' height='28' fill='%2324273a'/%3E%3Ctext x='180' y='305' text-anchor='middle' font-family='Consolas, Courier New, monospace' font-size='320' font-weight='bold' fill='%233776ab'%3E%26gt%3B%3C/text%3E%3Ctext x='320' y='280' text-anchor='middle' font-family='Consolas, Courier New, monospace' font-size='320' font-weight='bold' fill='%23ffd43b'%3E_%3C/text%3E%3C/svg%3E">
     <link rel="stylesheet" href="vendor/xterm.css">
-    <link rel="stylesheet" href="css/style.css?v=20261113b">
+    <link rel="stylesheet" href="css/style.css?v=20261113c">
 </head>
 <body>
     <div id="app">
@@ -44,6 +44,7 @@
                         <button id="btn-sftp-upload-folder" class="btn btn-sm btn-primary" title="选择整个文件夹上传，保留目录结构">📁 上传文件夹</button>
                         <button id="btn-sftp-mkdir" class="btn btn-sm" title="新建目录，支持多级路径如 docs/images">+ 新建目录</button>
                         <button id="btn-sftp-newfile" class="btn btn-sm" title="在当前目录新建空文件，已存在不会覆盖">+ 新建文件</button>
+                        <button id="btn-sftp-diff" class="btn btn-sm" title="选本地文件夹，先对比大小/时间，只上传有变化的文件">⇄ 目录对比</button>
                         <button id="btn-sftp-refresh" class="btn btn-sm">刷新</button>
                     </div>
                     <div id="sftp-progress" class="sftp-progress hidden">
@@ -139,6 +140,14 @@
                 </div>
             </div>
             <div id="terminal-container">
+                <div id="terminal-search" class="hidden">
+                    <input type="text" id="terminal-search-input" spellcheck="false"
+                           autocomplete="off" placeholder="在终端输出中搜索（Ctrl+F）">
+                    <span id="terminal-search-count"></span>
+                    <button id="terminal-search-prev" class="btn btn-xs" title="上一处 (Shift+Enter)">↑</button>
+                    <button id="terminal-search-next" class="btn btn-xs" title="下一处 (Enter)">↓</button>
+                    <button id="terminal-search-close" class="btn btn-xs" title="关闭 (Esc)">×</button>
+                </div>
                 <div id="terminal-welcome">
                     <div class="welcome-content">
                         <h2>PyShell</h2>
@@ -329,7 +338,7 @@
             <div class="dialog-body" style="padding:16px">
                 <div class="form-row" style="margin-bottom:12px">
                     <div class="form-group" style="flex:1;margin-bottom:0">
-                        <input type="text" id="fav-command" placeholder="命令，如: ls -la /var/log"
+                        <input type="text" id="fav-command" placeholder="命令，如: ls -la /var/log；变量写成 {{文件名}}"
                                spellcheck="false" autocomplete="off">
                     </div>
                     <div class="form-group" style="width:150px;margin-bottom:0">
@@ -351,6 +360,26 @@
                     </div>
                 </div>
                 <div id="favorites-list" class="list-container" style="max-height:280px;overflow-y:auto"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 目录差异预览（本地目录 vs 远端目录，只上传有变化的文件） -->
+    <div id="sftp-diff-overlay" class="dialog-overlay hidden">
+        <div class="dialog sftp-diff-dialog">
+            <div class="dialog-header">
+                <h3>目录差异预览</h3>
+                <button class="dialog-close" id="btn-sftp-diff-close" title="关闭">&times;</button>
+            </div>
+            <div class="dialog-body sftp-diff-body">
+                <div id="sftp-diff-head" class="sftp-diff-head"></div>
+                <div id="sftp-diff-summary" class="sftp-diff-summary"></div>
+                <div id="sftp-diff-list" class="sftp-diff-list"></div>
+            </div>
+            <div class="dialog-footer sftp-diff-footer">
+                <span class="sftp-diff-note">只上传本地较新/较大的文件；远端多出来的旧文件只列出，不会删除。</span>
+                <button id="btn-sftp-diff-cancel" class="btn">取消</button>
+                <button id="btn-sftp-diff-apply" class="btn btn-primary">开始上传</button>
             </div>
         </div>
     </div>
@@ -380,13 +409,14 @@
     <script src="vendor/xterm.js"></script>
     <script src="vendor/xterm-addon-fit.js"></script>
     <script src="vendor/xterm-addon-web-links.js"></script>
-    <script src="js/session.js?v=20261113b"></script>
-    <script src="js/terminal.js?v=20261113b"></script>
-    <script src="js/queue.js?v=20261113b"></script>
-    <script src="js/dialog.js?v=20261113b"></script>
-    <script src="js/sftp.js?v=20261113b"></script>
-    <script src="js/tasks.js?v=20261113b"></script>
-    <script src="js/app.js?v=20261113b"></script>
+    <script src="js/session.js?v=20261113c"></script>
+    <script src="js/terminal.js?v=20261113c"></script>
+    <script src="js/queue.js?v=20261113c"></script>
+    <script src="js/dialog.js?v=20261113c"></script>
+    <script src="js/template.js?v=20261113c"></script>
+    <script src="js/sftp.js?v=20261113c"></script>
+    <script src="js/tasks.js?v=20261113c"></script>
+    <script src="js/app.js?v=20261113c"></script>
 
     <!-- Toast 提示容器 -->
     <div id="toast-container"></div>

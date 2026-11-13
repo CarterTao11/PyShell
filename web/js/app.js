@@ -142,6 +142,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         SFTPManager.createFile(sftpConnId());
     });
 
+    document.getElementById('btn-sftp-diff').addEventListener('click', () => {
+        SFTPManager.diffUpload(sftpConnId());
+    });
+
+    // 差异预览弹层：关闭/取消/点遮罩都只是收起，不上传
+    const diffOverlay = document.getElementById('sftp-diff-overlay');
+    document.getElementById('btn-sftp-diff-close').addEventListener('click', () => SFTPManager.closeDiffPreview());
+    document.getElementById('btn-sftp-diff-cancel').addEventListener('click', () => SFTPManager.closeDiffPreview());
+    document.getElementById('btn-sftp-diff-apply').addEventListener('click', () => SFTPManager.applyDiffUpload());
+    diffOverlay.addEventListener('click', (e) => {
+        if (e.target === diffOverlay) SFTPManager.closeDiffPreview();
+    });
+
     document.getElementById('btn-sftp-refresh').addEventListener('click', () => {
         const connId = sftpConnId();
         // 刷新只是重新列目录，不能让终端跟着 cd
@@ -202,6 +215,58 @@ document.addEventListener('DOMContentLoaded', async () => {
             editorTa.selectionStart = editorTa.selectionEnd = start + 1;
             // 直接改 value 不会触发 input 事件，手动派发一次让行号槽与脏标记跟上
             editorTa.dispatchEvent(new Event('input'));
+        }
+    });
+
+    // ===== 终端内搜索（Ctrl+F）=====
+    const searchBox = document.getElementById('terminal-search');
+    const searchInput = document.getElementById('terminal-search-input');
+    const searchOpen = () => searchBox && !searchBox.classList.contains('hidden');
+
+    document.addEventListener('keydown', (e) => {
+        if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+        if (e.key !== 'f' && e.key !== 'F') return;
+        // 只在终端区域内劫持：用户在 SFTP 路径框、命令输入框里按 Ctrl+F 不该被吃掉
+        const target = e.target;
+        const inTerminal = (target && target.closest && target.closest('#terminal-container')) || searchOpen();
+        if (!inTerminal) return;
+        e.preventDefault();
+        TerminalManager.openSearch();
+    });
+
+    searchInput.addEventListener('input', () => {
+        TerminalManager._runSearch(searchInput.value, false);
+    });
+
+    searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            // 查询词改过还没搜过时，先按新词搜一次，再走"下一处"
+            if (TerminalManager.searchState.query !== searchInput.value) {
+                TerminalManager._runSearch(searchInput.value, false);
+            } else {
+                TerminalManager.searchStep(e.shiftKey ? -1 : 1);
+            }
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            TerminalManager.closeSearch();
+        }
+    });
+
+    document.getElementById('terminal-search-next').addEventListener('click', () => {
+        TerminalManager.searchStep(1);
+    });
+    document.getElementById('terminal-search-prev').addEventListener('click', () => {
+        TerminalManager.searchStep(-1);
+    });
+    document.getElementById('terminal-search-close').addEventListener('click', () => {
+        TerminalManager.closeSearch();
+    });
+
+    // 搜索开着时按 Esc 一律收起（焦点可能不在输入框里）
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && searchOpen()) {
+            TerminalManager.closeSearch();
         }
     });
 
@@ -514,7 +579,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             ">
                 <div style="flex:1;min-width:0">
                     <div style="font-family:'Consolas','Monaco',monospace;color:#e8e8f0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px" title="${item.command}">${item.command}</div>
-                    <div style="font-size:11px;color:#7a7a8c">${item.description || '无描述'}</div>
+                    <div style="font-size:11px;color:#7a7a8c">${item.description || '无描述'}${CommandTemplate.isTemplate(item.command) ? ' · 模板，执行时填 ' + CommandTemplate.varsOf(item.command).length + ' 个参数' : ''}</div>
                 </div>
                 <div style="text-align:right;margin-left:12px">
                     <span style="display:inline-block;background:#2a2a45;color:#8b8ba3;padding:2px 8px;border-radius:10px;font-size:10px">${item.use_count}次</span>
@@ -595,10 +660,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             showToast('没有活动的终端连接', 'warning');
             return;
         }
+        let command = favorite.command;
+        // 带 {{变量}} 的模板：先填参数再发；取消就不发、也不算一次使用
+        if (CommandTemplate.isTemplate(command)) {
+            const values = await CommandTemplate.fill(favorite);
+            if (!values) return;
+            command = CommandTemplate.apply(command, values);
+        }
         // 发送命令到终端（走 TerminalManager._sendInput，收藏里的 cd 也会
         // 被目录跟踪识别，SFTP 面板随之更新）
-        const command = favorite.command + '\n';
-        TerminalManager._sendInput(TerminalManager.activeConnId, command);
+        TerminalManager._sendInput(TerminalManager.activeConnId, command + '\n');
         // 增加使用次数
         await fetch(`/api/command-favorites/${favorite.id}/use`, { method: 'POST' });
     }
@@ -636,7 +707,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         // 当收藏面板显示时的键盘操作
-        if (terminalFavPanel.style.display !== 'none') {
+        if (terminalFavPanel.style.display !== 'none'
+                && document.activeElement
+                && document.activeElement.id !== 'terminal-search-input') {
             if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'ArrowDown')) {
                 e.preventDefault();
                 selectNextFav();
@@ -862,6 +935,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 切换到设置标签时加载配置
     document.querySelector('[data-tab=settings]').addEventListener('click', loadEmailSettings);
 
+    // 命令模板（{{变量}}）的实现见 js/template.js，这里只负责接到 UI 上
+
     // ===== 命令收藏夹 =====
     const CommandFavorites = {
         currentSort: 'use_count',
@@ -884,13 +959,18 @@ document.addEventListener('DOMContentLoaded', async () => {
                 container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted)">暂无收藏命令<br><small style="color:#666">点击顶部「收藏夹」按钮添加常用命令</small></div>';
                 return;
             }
-            container.innerHTML = favorites.map(f => `
+            container.innerHTML = favorites.map(f => {
+                const vars = CommandTemplate.varsOf(f.command);
+                const tplBadge = vars.length
+                    ? `<span style="background:rgba(0,122,204,0.18);color:var(--accent);border:1px solid rgba(0,122,204,0.4);padding:1px 6px;border-radius:8px;font-size:10px;margin-left:6px" title="执行时会让你填这些参数">模板 ${vars.length}</span>`
+                    : '';
+                return `
                 <div class="favorite-item" data-id="${f.id}" draggable="true" style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;cursor:grab;transition:background 0.15s" onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background=''">
                     <div style="display:flex;align-items:center;gap:8px">
                         <span style="color:var(--text-muted);cursor:grab;font-size:14px">☰</span>
                         <div style="flex:1;min-width:0">
-                            <div style="font-family:'Consolas','Monaco',monospace;font-size:13px;color:var(--text-highlight);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${f.command}">${f.command}</div>
-                            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${f.description || '无描述'}</div>
+                            <div style="font-family:'Consolas','Monaco',monospace;font-size:13px;color:var(--text-highlight);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${f.command}">${f.command}${tplBadge}</div>
+                            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${f.description || '无描述'}${vars.length ? ' · 参数: ' + vars.join(', ') : ''}</div>
                         </div>
                     </div>
                     <div style="display:flex;align-items:center;gap:8px">
@@ -898,7 +978,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                         <button class="btn-delete-fav btn btn-xs" style="padding:4px 8px;border:none;background:transparent;color:var(--text-muted)" title="删除">✕</button>
                     </div>
                 </div>
-            `).join('');
+            `;
+            }).join('');
 
             // 拖拽排序
             this.initDragAndDrop(container);
@@ -1002,7 +1083,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 document.getElementById('fav-command').value = '';
                 document.getElementById('fav-description').value = '';
                 this.load();
-                showToast('命令已添加收藏', 'success');
+                const vars = CommandTemplate.varsOf(command);
+                showToast(vars.length
+                    ? `已保存为模板：执行时会依次填 ${vars.map(v => '{{' + v + '}}').join('、')}`
+                    : '命令已添加收藏', 'success');
             } else {
                 const err = await res.json();
                 showToast('添加收藏失败: ' + (err.error || '未知错误'), 'error');
