@@ -1170,8 +1170,8 @@ body.resizing #main-content {
 }
 
 .sftp-progress-track {
-    flex: 1;
-    min-width: 80px;
+    flex: 1 1 120px;
+    min-width: 60px;
     height: 8px;
     background: var(--bg-tertiary);
     border: 1px solid var(--border);
@@ -1189,8 +1189,15 @@ body.resizing #main-content {
 
 /* HTTP 已经发完、等服务器落到远端目录：用斜纹提示"还在写" */
 .sftp-progress-bar.is-flushing {
-    background: repeating-linear-gradient(
-        45deg, var(--accent) 0 6px, var(--accent-hover) 6px 12px);
+    background-image: repeating-linear-gradient(
+        45deg, var(--accent) 0 6px, rgba(255, 255, 255, 0.4) 6px 12px);
+    /* 斜纹要看得见才有"仍在写入"的意思，所以给一个跑马位移（一个周期 ≈ 17px） */
+    animation: sftp-progress-stripes 0.8s linear infinite;
+}
+
+@keyframes sftp-progress-stripes {
+    from { background-position: 0 0; }
+    to { background-position: 17px 0; }
 }
 
 .sftp-progress-bar.is-error {
@@ -1198,12 +1205,21 @@ body.resizing #main-content {
 }
 
 .sftp-progress-text {
-    flex: 0 0 auto;
-    min-width: 168px;
+    /* 面板变窄时先截断尾部（保进度百分比，速度那截可以省），不要把取消按钮挤成两行 */
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     text-align: right;
     color: var(--text-primary);
     font-family: 'Consolas', 'Courier New', monospace;
     font-variant-numeric: tabular-nums;
+}
+
+.sftp-progress .btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
 }
 
 .list-container.dragover {

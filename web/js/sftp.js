@@ -649,7 +649,6 @@ const SFTPManager = {
             pct = (p.fileIndex / Math.max(1, p.totalFiles)) * 100;
         }
 
-        const filePct = p.total > 0 ? Math.min(100, (loaded / p.total) * 100) : (p.finished ? 100 : 0);
         const flushing = !p.finished && p.total > 0 && loaded >= p.total;
         const elapsed = Math.max(0.3, (Date.now() - (p.startedAt || Date.now())) / 1000);
         const speed = (doneBytes + loaded) / elapsed;
@@ -658,13 +657,16 @@ const SFTPManager = {
             ? `完成 ${p.totalFiles}/${p.totalFiles}`
             : `${p.fileIndex + 1}/${p.totalFiles} · ${p.name}`;
 
+        // 多文件时进度条是"整批"进度，文字里的百分比也标成整体，避免和单文件字节打架
+        const overallTag = p.totalFiles > 1 ? '整体 ' : '';
+
         let text;
         if (p.finished) {
             text = `100% · ${this._formatBytes(totalBytes)}`;
         } else if (flushing) {
-            text = `${filePct.toFixed(0)}% · 写入远端…`;
+            text = `${overallTag}${pct.toFixed(0)}% · 写入远端…`;
         } else {
-            text = `${pct.toFixed(0)}% · ${this._formatBytes(loaded)}/${this._formatBytes(p.total)}`
+            text = `${overallTag}${pct.toFixed(0)}% · ${this._formatBytes(loaded)}/${this._formatBytes(p.total)}`
                 + (speed > 0 ? ` · ${this._formatBytes(speed)}/s` : '');
         }
 
