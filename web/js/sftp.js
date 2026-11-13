@@ -718,42 +718,98 @@ const SFTPManager = {
         }
     },
 
-    closeEditor() {
-        if (this._editorDirty && !confirm('有未保存的修改，确定关闭？')) return;
+    async closeEditor() {
+        if (this._editorDirty) {
+            const ok = await Dialog.confirm('有未保存的修改，确定关闭？', {
+                title: '关闭编辑器', message: '未保存的修改将会丢失。',
+                okText: '放弃修改', cancelText: '继续编辑', danger: true,
+            });
+            if (!ok) return;
+        }
         document.getElementById('editor-overlay').classList.add('hidden');
         this._editingPath = null;
         this._editorDirty = false;
     },
 
-    async newFile(parentPath) {
-        const fileName = prompt('文件名:', 'newfile.txt');
-        if (!fileName) return;
-        const fullPath = (parentPath.endsWith('/') ? parentPath : parentPath + '/') + fileName;
+    /**
+     * 新建文件。工具栏"+ 新建文件"与右键菜单共用这一个实现。
+     * @param {string} [parentPath] 建在哪个目录下，默认当前目录
+     * @param {string} [connId] 连接 id，默认当前连接
+     */
+    async newFile(parentPath, connId) {
+        const conn = connId || this.currentConnId;
+        const base = this.normalizePath(parentPath || this.currentPath || '/');
+        if (!conn) {
+            showToast('请先连接一个终端', 'warning');
+            return;
+        }
+        const input = await Dialog.prompt({
+            title: '新建文件',
+            message: base,
+            label: '文件名（可含子目录，如 logs/app.log）',
+            value: 'newfile.txt',
+            okText: '创建',
+        });
+        if (input === null) return;                       // 取消
+        const name = String(input).trim().replace(/^\/+/, '');
+        if (!name) {
+            showToast('文件名不能为空', 'warning');
+            return;
+        }
+        // 逐段校验：拒绝 . / ..（否则会指向父目录或造出怪文件）+ 拒绝控制字符
+        const segments = name.split('/').filter(s => s !== '');
+        if (!segments.length || segments.some(s => s === '.' || s === '..' || /[\x00-\x1f]/.test(s))) {
+            showToast('文件名无效（不能是 . / .. 或包含控制字符）', 'warning');
+            return;
+        }
+        const fullPath = this.normalizePath(base + '/' + segments.join('/'));
+        // 防止误删/误覆盖：目标必须是 base 下的文件，而不是目录本身
+        if (fullPath === base) {
+            showToast('文件名无效', 'warning');
+            return;
+        }
+
         try {
-            const res = await fetch('/api/sftp/touch/' + this.currentConnId, {
+            const res = await fetch('/api/sftp/touch/' + conn, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({path: fullPath}),
+                // exclusive: 同名文件直接报错，不截断已有内容
+                body: JSON.stringify({path: fullPath, exclusive: true}),
             });
             const result = await res.json();
             if (!result.success) {
                 showToast('创建文件失败: ' + result.error, 'error');
                 return;
             }
-            // Check if browse dir is the parent
-            if (this.currentPath && fullPath.startsWith(this.currentPath)) {
-                this.browse(this.currentConnId, this.currentPath, { syncTerminal: false });
+            if (this.currentConnId === conn) {
+                this.browse(conn, this.currentPath, { syncTerminal: false });
             }
-            showToast('文件已创建', 'success');
+            showToast('文件已创建: ' + fullPath, 'success');
         } catch (e) {
             showToast('创建文件失败: ' + e.message, 'error');
         }
     },
 
+    /** 工具栏入口：在当前目录新建文件 */
+    async createFile(connId) {
+        return this.newFile(this.currentPath, connId);
+    },
+
     async newFolder(parentPath) {
-        const folderName = prompt('文件夹名:', 'newfolder');
-        if (!folderName) return;
-        const fullPath = (parentPath.endsWith('/') ? parentPath : parentPath + '/') + folderName;
+        const folderName = await Dialog.prompt({
+            title: '新建文件夹',
+            message: parentPath,
+            label: '文件夹名',
+            value: 'newfolder',
+            okText: '创建',
+        });
+        if (folderName === null) return;
+        const name = folderName.trim();
+        if (!name) {
+            showToast('文件夹名不能为空', 'warning');
+            return;
+        }
+        const fullPath = (parentPath.endsWith('/') ? parentPath : parentPath + '/') + name;
         try {
             const res = await fetch('/api/sftp/mkdir/' + this.currentConnId, {
                 method: 'POST',
@@ -775,8 +831,19 @@ const SFTPManager = {
     },
 
     async mkdir(connId) {
-        const name = prompt('输入新目录名称:');
-        if (!name) return;
+        const raw = await Dialog.prompt({
+            title: '新建目录',
+            message: this.currentPath || '/',
+            label: '目录名称（支持多级，如 docs/images）',
+            value: '',
+            okText: '创建',
+        });
+        if (raw === null) return;
+        const name = raw.trim();
+        if (!name) {
+            showToast('目录名称不能为空', 'warning');
+            return;
+        }
 
         // recursive: true —— 允许一次输入多级路径（如 docs/images），父目录自动补建
         const target = this.normalizePath(this.currentPath + '/' + name);
@@ -800,7 +867,12 @@ const SFTPManager = {
     },
 
     async deleteFile(path, isDir) {
-        if (!confirm(`确定删除 ${isDir ? '目录' : '文件'} "${path}" 吗？`)) return;
+        const ok = await Dialog.confirm(`确定删除${isDir ? '目录' : '文件'} "${path}" 吗？`, {
+            title: isDir ? '删除目录' : '删除文件',
+            message: isDir ? '目录及其全部内容都会被删除，且不可恢复。' : '文件删除后不可恢复。',
+            okText: '删除', cancelText: '取消', danger: true,
+        });
+        if (!ok) return;
 
         try {
             const res = await fetch(`/api/sftp/delete/${this.currentConnId}`, {

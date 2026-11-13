@@ -105,7 +105,9 @@ const TaskManager = {
                 const t = (r.tasks || []).find(x => x.id === id);
                 if (t) this._fillForm(t);
             } else if (ds.act === 'del') {
-                if (!confirm('确定删除该任务？')) return;
+                if (!(await Dialog.confirm('确定删除该任务？', {
+                    title: '删除定时任务', okText: '删除', danger: true,
+                }))) return;
                 await this._api(`/api/tasks/${id}`, { method: 'DELETE' });
                 if (this.editingId === id) this._resetForm();
                 await this.refresh();

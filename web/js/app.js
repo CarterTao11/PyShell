@@ -134,6 +134,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         SFTPManager.mkdir(sftpConnId());
     });
 
+    document.getElementById('btn-sftp-newfile').addEventListener('click', () => {
+        SFTPManager.createFile(sftpConnId());
+    });
+
     document.getElementById('btn-sftp-refresh').addEventListener('click', () => {
         const connId = sftpConnId();
         // 刷新只是重新列目录，不能让终端跟着 cd
@@ -900,7 +904,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 btn.addEventListener('click', async (e) => {
                     e.stopPropagation();
                     const id = e.target.closest('.favorite-item').dataset.id;
-                    if (confirm('确定删除这条收藏命令？')) {
+                    if (await Dialog.confirm('确定删除这条收藏命令？', {
+                        title: '删除收藏命令', okText: '删除', danger: true,
+                    })) {
                         const res = await fetch(`/api/command-favorites/${id}`, { method: 'DELETE' });
                         const result = await res.json();
                         if (result.success === false) {

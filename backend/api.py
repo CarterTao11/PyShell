@@ -606,14 +606,30 @@ def _sftp_mkdir_p(sftp, path):
 
 @api_bp.route("/api/sftp/touch/<conn_id>", methods=["POST"])
 def sftp_touch(conn_id):
-    """Create an empty file on remote via SFTP."""
+    """Create an empty file on remote via SFTP.
+
+    默认行为是"创建/清空"（保持与旧调用方一致）。前端新建文件时传
+    ``exclusive: true``，此时同名文件已存在会直接报错，绝不截断已有内容。
+    """
     data = request.get_json(force=True)
     path = data.get("path", "")
+    exclusive = bool(data.get("exclusive", False))
     if not path:
         return jsonify({"success": False, "error": "No path provided"}), 400
     try:
         client = conn_mgr.get_connection(conn_id)
         sftp = client.get_sftp_client()
+        if exclusive:
+            try:
+                sftp.stat(path)
+            except OSError:
+                pass  # 文件不存在，可以创建
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": "同名文件已存在（未覆盖）",
+                    "exists": True,
+                })
         with sftp.open(path, 'wb') as f:
             f.write(b'')
         return jsonify({"success": True, "path": path})
