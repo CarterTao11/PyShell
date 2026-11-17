@@ -138,6 +138,12 @@ const TerminalManager = {
                 this.activateTerminal(connId);
             }
         });
+        // 右键：自绘菜单（复制为新标签页），不弹浏览器原生菜单
+        tab.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this._showTabContextMenu(e, connId);
+        });
 
         // Initialize xterm.js
         const term = new Terminal({
@@ -267,6 +273,10 @@ const TerminalManager = {
             term, fit, sessionId, connId,
             termDiv, tab,
             eventSource: null,
+            config: config || null,    // 重连 / 复制新标签都要复用这份连接参数
+            closed: false,             // 远端已断开（下一次输入时无感重连）
+            reconnecting: false,      // 重连进行中，期间输入攒进 pendingInput
+            pendingInput: '',         // 断线期间攒下的、待重连成功后补发的输入
         };
         this._outReset(inst);        // 输出管道的队列/水位状态
         this.instances.set(connId, inst);
@@ -310,11 +320,12 @@ const TerminalManager = {
 
         // Server closed the stream because the SSH channel ended
         es.addEventListener('closed', () => {
-            inst.term.write('\r\n\x1b[33m[连接已断开]\x1b[0m\r\n');
             es.close();
-            // 远端掉的线（不是用户主动断）：红灯，提示需要重连
+            inst.closed = true;
             this.connectedSessions.delete(inst.sessionId);
             this._setSessionState(inst.sessionId, 'error');
+            // 不销毁终端界面：用户下一次输入时走 _reconnect 无感接上
+            this._writeStatus(inst, '\r\n\x1b[33m[连接已断开，等待下次命令自动重连]\x1b[0m\r\n');
         });
 
         es.onmessage = (event) => {
@@ -579,13 +590,35 @@ const TerminalManager = {
     },
 
     _sendInput(connId, data) {
+        const inst = this.instances.get(connId);
+        if (!inst) return;
         // 先本地解析输入流以跟踪 cwd（粘贴整行、多字符输入也能识别），再发往远端
         this._feedInput(connId, data);
+
+        // 重连进行中：输入先攒着，接上后一次性补发，不丢字符
+        if (inst.reconnecting) {
+            inst.pendingInput = (inst.pendingInput || '') + data;
+            return;
+        }
+        // 已断开：把输入攒起来并触发一次自动重连（无感：用户照常敲命令即可）
+        if (inst.closed) {
+            inst.pendingInput = (inst.pendingInput || '') + data;
+            this._reconnect(inst);
+            return;
+        }
+
         fetch(`/api/ssh/input/${connId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'text/plain' },
             body: data,
-        }).catch(err => console.error('Send input error:', err));
+        }).then(res => {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+        }).catch(err => {
+            console.error('Send input error:', err);
+            inst.closed = true;
+            inst.pendingInput = (inst.pendingInput || '') + data;
+            this._reconnect(inst);
+        });
     },
 
     /**
@@ -1152,6 +1185,143 @@ const TerminalManager = {
             } catch (e) { /* ignore transient layout errors */ }
             this._syncResize(id);
         });
+    },
+
+    /** 终端里写一行状态（重连提示等），失败静默，不能打断输入 */
+    _writeStatus(inst, text) {
+        try { inst.term && inst.term.write(text); } catch (e) { /* 终端已销毁时忽略 */ }
+    },
+
+    /** 标签右键菜单：复制为新标签页 */
+    _showTabContextMenu(e, connId) {
+        document.querySelectorAll('.context-menu').forEach(el => el.remove());
+
+        const menu = document.createElement('div');
+        menu.className = 'context-menu';
+        menu.style.left = e.clientX + 'px';
+        menu.style.top = e.clientY + 'px';
+        menu.innerHTML = `
+            <div class="context-menu-item" data-action="duplicate">复制为新标签页</div>
+        `;
+        document.body.appendChild(menu);
+
+        menu.querySelectorAll('.context-menu-item').forEach(item => {
+            item.addEventListener('click', () => {
+                if (item.dataset.action === 'duplicate') this.duplicateTab(connId);
+                menu.remove();
+            });
+        });
+        // 点菜单外任意处关闭
+        setTimeout(() => {
+            document.addEventListener('click', () => menu.remove(), { once: true });
+        }, 0);
+    },
+
+    /** 用同一会话的连接参数再开一个终端标签（新的 SSH 通道，互不影响） */
+    async duplicateTab(connId) {
+        const inst = this.instances.get(connId);
+        if (!inst || !inst.config) return;
+        const base = inst.config;
+        const cfg = Object.assign({}, base, {
+            name: (base.name || base.host || connId) + ' 副本',
+        });
+        await this.connect(inst.sessionId, cfg);
+    },
+
+    /**
+     * 无感自动重连：在原终端标签上重新拨号，成功后把断线期间攒下的输入补发。
+     * 重连失败不销毁界面，下次输入会再试一次。
+     */
+    async _reconnect(inst) {
+        if (!inst || inst.reconnecting) return;
+        if (!inst.config) {
+            showToast('连接已断开，缺少重连配置，请重新从会话列表打开', 'error');
+            return;
+        }
+        inst.reconnecting = true;
+        inst.closed = false;
+        this._setSessionState(inst.sessionId, 'connecting');
+        const oldConnId = inst.connId;
+
+        // 旧的 SSE 先关掉，避免两条流往同一个终端写
+        if (inst.eventSource) {
+            inst.eventSource.close();
+            inst.eventSource = null;
+        }
+
+        try {
+            this._writeStatus(inst, '\r\n\x1b[33m[正在自动重新连接…]\x1b[0m\r\n');
+            const res = await fetch('/api/ssh/connect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(inst.config),
+            });
+            const result = await res.json();
+            if (!result.success) throw new Error(result.error || '连接失败');
+
+            const newConnId = result.conn_id;
+
+            // 旧通道已经是死的：清掉后端残留连接，别留下泄漏的 SSH 通道
+            try {
+                await fetch('/api/ssh/disconnect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ conn_id: oldConnId }),
+                });
+            } catch (e) { /* 旧连接清理失败不影响新连接 */ }
+
+            this._rebindConnId(inst, oldConnId, newConnId);
+            // 新通道是全新 shell：清掉旧跟踪目录，让 home 目录重新初始化
+            this.cwdMap.delete(newConnId);
+            await this._initHomeDir(newConnId);
+            this._startSSE(newConnId);
+            this.connectedSessions.add(inst.sessionId);
+            this._setSessionState(inst.sessionId, 'connected');
+
+            // 补发断线期间攒下的输入（本地输入解析在断线时已经做过一遍，这里只补发到远端）
+            const pending = inst.pendingInput || '';
+            inst.pendingInput = '';
+            inst.reconnecting = false;
+            if (pending) this._flushPendingInput(inst, pending);
+        } catch (e) {
+            inst.reconnecting = false;
+            inst.closed = true;
+            this._setSessionState(inst.sessionId, 'error');
+            showToast('自动重连失败: ' + ((e && e.message) || e), 'error');
+        }
+    },
+
+    /** 把实例从旧 connId 迁到新 connId（实例表、DOM、目录缓存、分屏引用一起换） */
+    _rebindConnId(inst, oldId, newId) {
+        this.instances.delete(oldId);
+        this.instances.set(newId, inst);
+        inst.connId = newId;
+        if (inst.termDiv) inst.termDiv.id = 'term-' + newId;
+        if (inst.tab) inst.tab.dataset.connId = newId;
+        if (this.activeConnId === oldId) this.activeConnId = newId;
+        if (this._prevActive === oldId) this._prevActive = newId;
+
+        const moveMap = (m) => {
+            if (m.has(oldId)) {
+                m.set(newId, m.get(oldId));
+                m.delete(oldId);
+            }
+        };
+        moveMap(this.cwdMap);
+        moveMap(this.homeMap);
+        moveMap(this.prevCwdMap);
+
+        const idx = this.splitPanes.indexOf(oldId);
+        if (idx !== -1) this.splitPanes[idx] = newId;
+    },
+
+    /** 重连成功后把攒下的输入直接发到新通道，不再走本地输入解析 */
+    _flushPendingInput(inst, pending) {
+        fetch(`/api/ssh/input/${inst.connId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain' },
+            body: pending,
+        }).catch(err => console.error('Flush pending input error:', err));
     },
 
     async disconnect(connId) {
